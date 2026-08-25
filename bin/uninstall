@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# Remove only the plugin's tagged F10 binding.  Runtime/model/settings data is
+# retained unless the caller explicitly requests --purge and confirms it.
+set -Eeuo pipefail
+
+CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+BINDINGS="$CONFIG_HOME/hypr/bindings.lua"
+DATA_ROOT="$DATA_HOME/omayap-read-aloud"
+CONFIG_ROOT="$CONFIG_HOME/omayap-read-aloud"
+BEGIN_MARKER="-- BEGIN OMAYAP_READ_ALOUD_F10"
+END_MARKER="-- END OMAYAP_READ_ALOUD_F10"
+
+die() {
+  echo "uninstall: $*" >&2
+  exit 1
+}
+
+validate_hyprland() {
+  local errors=""
+  hyprctl reload >/dev/null 2>&1 || return 1
+  errors="$(hyprctl configerrors 2>&1 || true)"
+  [[ -z "$errors" ]] && return 0
+  if grep -Eiq 'error|invalid|failed|parse' <<<"$errors" \
+    && ! grep -Eiq 'no errors|no config errors|config is valid|0 errors' <<<"$errors"; then
+    return 1
+  fi
+  return 0
+}
+
+remove_binding_block() {
+  local tmp="$1"
+  awk -v begin="$BEGIN_MARKER" -v end="$END_MARKER" '
+    $0 == begin { dropping = 1; found = 1; next }
+    $0 == end { if (!dropping) { malformed = 1 } else { dropping = 0; closed = 1 }; next }
+    !dropping { print }
+    END { if (malformed || (found && !closed)) exit 3; if (found) exit 0; exit 2 }
+  ' "$BINDINGS" >"$tmp"
+}
+
+remove_binding() {
+  [[ -f "$BINDINGS" && ! -L "$BINDINGS" ]] || return 0
+  local tmp backup rc
+  tmp="$(mktemp "${BINDINGS}.tmp.XXXXXX")"
+  if remove_binding_block "$tmp"; then
+    :
+  else
+    rc=$?
+    rm -f -- "$tmp"
+    ((rc == 2)) && return 0
+    die "refusing to edit malformed tagged binding block"
+  fi
+  backup="$BINDINGS.bak.uninstall.$(date +%Y%m%d%H%M%S)"
+  cp -p -- "$BINDINGS" "$backup"
+  chmod --reference="$BINDINGS" "$tmp" 2>/dev/null || chmod 600 -- "$tmp"
+  mv -f -- "$tmp" "$BINDINGS"
+  if ! validate_hyprland; then
+    cp -p -- "$backup" "$BINDINGS"
+    hyprctl reload >/dev/null 2>&1 || true
+    die "Hyprland rejected the edited bindings; the original bindings were restored"
+  fi
+  echo "uninstall: removed the tagged F10 binding (backup: $backup)"
+}
+
+safe_purge_path() {
+  local path="$1" parent="$2"
+  [[ -n "$path" && "$path" != "/" && "$path" == "$parent"/* ]] \
+    || die "refusing unsafe purge path: $path"
+  [[ ! -L "$path" ]] || die "refusing symlink purge path: $path"
+  [[ -e "$path" ]] && rm -rf -- "$path"
+}
+
+purge_data() {
+  if [[ "${OMAYAP_ASSUME_YES:-0}" != 1 ]]; then
+    [[ -t 0 ]] || die "--purge requires an interactive confirmation (set OMAYAP_ASSUME_YES=1 only for a reviewed test)"
+    local answer=""
+    read -r -p "Delete Omayap Read aloud runtime and settings? [y/N] " answer
+    [[ "$answer" == "y" || "$answer" == "Y" ]] || { echo "uninstall: purge cancelled"; return 0; }
+  fi
+  safe_purge_path "$DATA_ROOT" "$DATA_HOME"
+  safe_purge_path "$CONFIG_ROOT" "$CONFIG_HOME"
+  echo "uninstall: purged only $DATA_ROOT and $CONFIG_ROOT"
+}
+
+main() {
+  [[ -n "${HOME:-}" ]] || die "HOME is not set"
+  if command -v omarchy-shell >/dev/null 2>&1; then
+    omarchy-shell omayap.read-aloud stop >/dev/null 2>&1 || true
+  fi
+  if [[ -f "$BINDINGS" ]]; then
+    command -v hyprctl >/dev/null 2>&1 || die "hyprctl is required to validate binding removal"
+    remove_binding
+  fi
+  case "${1:-}" in
+    "") ;;
+    --purge) purge_data ;;
+    --help|-h)
+      echo "Usage: bin/uninstall [--purge]"
+      echo "Removes only the tagged F10 binding; --purge also removes plugin runtime/settings after confirmation."
+      ;;
+    *) die "unknown option: $1" ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,21 @@
+# Piper's runtime lock for Python 3.13.  Hashes cover the official x86_64
+# and aarch64 manylinux wheels used by Omarchy systems.
+flatbuffers==25.12.19 \
+    --hash=sha256:7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4
+numpy==2.5.2 \
+    --hash=sha256:29b86ff8a6cc556b47ec6b64b194815cc80e6bf5eedcc6cddfd65318cb0b4eee \
+    --hash=sha256:0aadf13b60048d501e05fa699efaf7734e2494f3498a4c2a5521d822640324f3
+onnxruntime==1.29.0 \
+    --hash=sha256:e2128f31f449e922c62dbe5d8b6b7b079f0bcaf2d56a102fa203cb6e5bb5ab19 \
+    --hash=sha256:d67673c5367727860922c5262d724472f1b5539fb7ccf4c81a638f9b71719803
+packaging==26.3 \
+    --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+pathvalidate==3.3.1 \
+    --hash=sha256:5263baab691f8e1af96092fa5137ee17df5bdfbd6cff1fcac4d6ef4bc2e1735f
+piper-tts==1.7.0 \
+    --hash=sha256:72adc623b977bdbbdf3d6f6bf88d66eda7cfe2ee8e7919a74a5952acb77a339e \
+    --hash=sha256:b43b2d299556bd6e87bcb6932fe853f8f89d65d7ad85cc372c89777ad2035d8f
+protobuf==7.36.0 \
+    --hash=sha256:53374d53fc29a67f7dbbf0ade47d7526a0f0137bf0f9c90e48d8a60790ef748c \
+    --hash=sha256:70f5ec8eb0da81a44360c0dc0beac99a0d78071d21956a7076bae8bd2051841b \
+    --hash=sha256:bf94a5917c71058262de683669bc0a797a7669d3de71f0b36d058e3194f47b44

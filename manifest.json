@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "omayap.read-aloud",
+  "name": "Read aloud",
+  "version": "1.0.0",
+  "author": "Omayap",
+  "license": "MIT",
+  "description": "Read the current text selection aloud locally with Piper neural TTS.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Read aloud",
+    "description": "Read the current selection or stop playback; right-click for speed and status.",
+    "category": "Accessibility",
+    "defaultSection": "right",
+    "allowMultiple": false
+  }
+}

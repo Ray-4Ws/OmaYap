@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+
+python3 -m unittest -v tests.test_worker
+
+if command -v omarchy >/dev/null 2>&1; then
+  (cd "$ROOT" && omarchy plugin validate .)
+fi
+if command -v qmllint >/dev/null 2>&1 && [[ -d /usr/share/omarchy/shell ]]; then
+  (cd "$ROOT" && qmllint -I /usr/share/omarchy/shell Service.qml BarWidget.qml)
+fi
+
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/omayap-read-aloud-tests.XXXXXX")"
+trap 'rm -rf -- "$tmp"' EXIT
+fakebin="$tmp/bin"
+home="$tmp/home"
+config="$tmp/config"
+data="$tmp/data"
+mkdir -p -- "$fakebin" "$home" "$config/hypr" "$data"
+
+cat >"$fakebin/uv" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat >"$fakebin/omarchy-shell" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat >"$fakebin/omarchy" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == "menu keybindings --print" && -n "${FAKE_EFFECTIVE:-}" && -f "$FAKE_EFFECTIVE" ]]; then
+  cat "$FAKE_EFFECTIVE"
+fi
+exit 0
+EOF
+cat >"$fakebin/hyprctl" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  binds)
+    [[ -n "${FAKE_BINDS:-}" && -f "$FAKE_BINDS" ]] && cat "$FAKE_BINDS"
+    ;;
+  configerrors)
+    if [[ "${FAKE_HYPR_FAIL:-0}" == 1 ]]; then echo "Error: fake config error"; else echo "No errors"; fi
+    ;;
+  reload) exit "${FAKE_RELOAD_CODE:-0}" ;;
+esac
+exit 0
+EOF
+chmod 700 -- "$fakebin"/*
+
+export HOME="$home"
+export XDG_CONFIG_HOME="$config"
+export XDG_DATA_HOME="$data"
+export PATH="$fakebin:$PATH"
+export FAKE_EFFECTIVE="$tmp/effective"
+export FAKE_BINDS="$tmp/binds"
+: >"$FAKE_EFFECTIVE"
+: >"$FAKE_BINDS"
+
+run_setup() {
+  OMAYAP_TEST_MODE=1 OMAYAP_TEST_PYTHON="$(command -v python3)" \
+    "$ROOT/bin/setup" >/dev/null
+}
+
+printf '%s\n' 'F10 Read selected text aloud' >"$FAKE_EFFECTIVE"
+if run_setup >/dev/null 2>&1; then
+  echo "setup incorrectly trusted an unmanaged F10 description" >&2
+  exit 1
+fi
+: >"$FAKE_EFFECTIVE"
+
+printf '%s\n' '[{"key":"F10","dispatcher":"exec","arg":"omarchy-shell omayap.read-aloud toggleSelection","description":"Read selected text aloud"}]' >"$FAKE_BINDS"
+if run_setup >/dev/null 2>&1; then
+  echo "setup trusted an unmanaged exact-command F10 JSON binding" >&2
+  exit 1
+fi
+: >"$FAKE_BINDS"
+
+printf '%s\n' 'o.bind("F10", "Read selected text aloud", "omarchy-shell omayap.read-aloud toggleSelection")' >"$config/hypr/bindings.lua"
+if run_setup >/dev/null 2>&1; then
+  echo "setup trusted an unmanaged exact-command user binding" >&2
+  exit 1
+fi
+rm -f -- "$config/hypr/bindings.lua"
+
+run_setup
+grep -Fqx -- '-- BEGIN OMAYAP_READ_ALOUD_F10' "$config/hypr/bindings.lua"
+grep -Fqx -- '-- END OMAYAP_READ_ALOUD_F10' "$config/hypr/bindings.lua"
+[[ "$(grep -Fc 'omayap.read-aloud toggleSelection' "$config/hypr/bindings.lua")" == 1 ]]
+[[ -f "$data/omayap-read-aloud/runtime-version" ]]
+rg -Fq 'PLUGIN_VERSION=$4' "$ROOT/Service.qml"
+
+printf '%s\n' 'F10 Read selected text aloud' >"$FAKE_EFFECTIVE"
+printf '%s\n' '[{"key":"F10","dispatcher":"__lua","arg":"270","description":"Read selected text aloud"}]' >"$FAKE_BINDS"
+first_binding_hash="$(sha256sum "$config/hypr/bindings.lua" | cut -d' ' -f1)"
+run_setup
+[[ "$(grep -Fc 'omayap.read-aloud toggleSelection' "$config/hypr/bindings.lua")" == 1 ]]
+second_binding_hash="$(sha256sum "$config/hypr/bindings.lua" | cut -d' ' -f1)"
+[[ "$first_binding_hash" == "$second_binding_hash" ]]
+
+printf '%s\n' '[{"key":"F10","dispatcher":"__lua","arg":"270","description":"Read selected text aloud"},{"key":"F10","dispatcher":"exec","arg":"foreign-action","description":"Foreign F10 action"}]' >"$FAKE_BINDS"
+if run_setup >/dev/null 2>&1; then
+  echo "setup missed a foreign F10 binding in mixed hyprctl JSON" >&2
+  exit 1
+fi
+: >"$FAKE_BINDS"
+
+printf '%s\n' '[{"key":"F10","dispatcher":"__lua","arg":"270","description":"Read selected text aloud"},{"key":"F10","dispatcher":"__lua","arg":"271","description":"Read selected text aloud"}]' >"$FAKE_BINDS"
+if run_setup >/dev/null 2>&1; then
+  echo "setup accepted duplicate opaque F10 bindings" >&2
+  exit 1
+fi
+: >"$FAKE_BINDS"
+
+printf '%s\n' 'F10 Existing action' >"$FAKE_EFFECTIVE"
+if run_setup >/dev/null 2>&1; then
+  echo "setup unexpectedly overrode a foreign F10 binding" >&2
+  exit 1
+fi
+: >"$FAKE_EFFECTIVE"
+
+before="$(sha256sum "$config/hypr/bindings.lua" | cut -d' ' -f1)"
+if FAKE_HYPR_FAIL=1 run_setup >/dev/null 2>&1; then
+  echo "setup unexpectedly accepted a fake Hyprland error" >&2
+  exit 1
+fi
+after="$(sha256sum "$config/hypr/bindings.lua" | cut -d' ' -f1)"
+[[ "$before" == "$after" ]]
+
+"$ROOT/bin/uninstall"
+! grep -Fq 'omayap.read-aloud toggleSelection' "$config/hypr/bindings.lua"
+[[ -f "$data/omayap-read-aloud/runtime-version" ]]
+
+mkdir -p -- "$config/omayap-read-aloud" "$data/omayap-read-aloud" "$config/keep" "$data/keep"
+: >"$config/keep/sentinel"
+: >"$data/keep/sentinel"
+OMAYAP_ASSUME_YES=1 "$ROOT/bin/uninstall" --purge
+[[ ! -e "$config/omayap-read-aloud" && ! -e "$data/omayap-read-aloud" ]]
+[[ -f "$config/keep/sentinel" && -f "$data/keep/sentinel" ]]
+
+echo "all Omayap Read Aloud tests passed"
