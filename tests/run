@@ -12,6 +12,10 @@ fi
 if command -v qmllint >/dev/null 2>&1 && [[ -d /usr/share/omarchy/shell ]]; then
   (cd "$ROOT" && qmllint -I /usr/share/omarchy/shell Service.qml BarWidget.qml)
 fi
+if rg -n -F 'root.pollTimer' "$ROOT/Service.qml"; then
+  echo "Service.qml must access the lexical pollTimer id directly" >&2
+  exit 1
+fi
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/omayap-read-aloud-tests.XXXXXX")"
 trap 'rm -rf -- "$tmp"' EXIT
