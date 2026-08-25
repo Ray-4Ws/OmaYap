@@ -194,7 +194,7 @@ prepare_runtime() {
   ensure_private_dir "$DATA_ROOT"
   ensure_private_dir "$MODEL_DIR"
   if [[ "${OMAYAP_TEST_MODE:-0}" == 1 ]]; then
-    # Tests use a host interpreter and placeholder files; no package or model
+    # Tests use a host interpreter and fixture files; no package or model
     # download is performed in this branch.
     require_command python3
     mkdir -p -- "$VENV/bin"
