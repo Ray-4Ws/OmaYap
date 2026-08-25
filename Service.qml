@@ -303,7 +303,7 @@ Item {
     var hadClearedClipboard = (root.clipboardCleared || root.captureStage === "clear-clipboard")
       && root.captureStage !== "restore" && root.captureStage !== "idle"
     root.captureSerial += 1
-    root.pollTimer.stop()
+    pollTimer.stop()
     if (primaryTypesProc.running) primaryTypesProc.running = false
     if (primaryTextProc.running) primaryTextProc.running = false
     if (clipboardTypesProc.running) clipboardTypesProc.running = false
@@ -382,7 +382,7 @@ Item {
       root.beginRestore(text)
       return
     }
-    root.pollTimer.start()
+    pollTimer.start()
   }
 
   // ------------------------------ settings and setup/runtime probes
@@ -587,7 +587,7 @@ Item {
       }
       root.captureStage = "poll"
       root.pollAttempts = 0
-      root.pollTimer.start()
+      pollTimer.start()
     }
   }
 
@@ -598,7 +598,7 @@ Item {
       onStreamFinished: root.handlePolledText(text)
     }
     onExited: function(exitCode) {
-      if (root.captureStage === "poll" && exitCode !== 0) root.pollTimer.start()
+      if (root.captureStage === "poll" && exitCode !== 0) pollTimer.start()
     }
   }
 
