@@ -19,7 +19,7 @@ Omarchy intentionally does not run plugin hooks or install dependencies. Use
 two explicit phases:
 
 ```bash
-omarchy plugin add <repository-url> --enable
+omarchy plugin add https://github.com/Ray-4Ws/omarchy-read-aloud --enable
 ~/.config/omarchy/plugins/omayap.read-aloud/bin/setup
 ```
 
