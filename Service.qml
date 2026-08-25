@@ -67,7 +67,7 @@ Item {
   }
 
   function setupHint() {
-    notify("Read aloud setup required", "Run bin/setup in the installed plugin directory.")
+    notify("OmaYap setup required", "Run bin/setup in the installed plugin directory.")
   }
 
   function statusJson() {
@@ -175,16 +175,16 @@ Item {
     if (root.errorCode === "selection-too-long") {
       var actual = Math.max(0, Number(parsed.actual || 0))
       var limit = Math.max(0, Number(parsed.limit || root.maxCharacters))
-      root.notify("Selection is too long", actual.toLocaleString() + " characters selected; maximum is " + limit.toLocaleString() + ".")
+      root.notify("OmaYap selection too long", actual.toLocaleString() + " characters selected; maximum is " + limit.toLocaleString() + ".")
     } else if (root.errorCode === "empty-selection") {
-      root.notify("Read aloud", "No text selection was available. Select text and try again.")
+      root.notify("OmaYap", "No text selection was available. Select text and try again.")
     } else if (root.errorCode === "audio-player-unavailable" || root.errorCode === "audio-player-failed") {
-      root.notify("Read aloud error", "PipeWire playback failed. Check that pw-play is available.")
+      root.notify("OmaYap error", "PipeWire playback failed. Check that pw-play is available.")
     } else if (root.errorCode === "voice-model-missing" || root.errorCode === "runtime-missing") {
       root.status = "setup-required"
       root.setupHint()
     } else if (root.errorCode === "synthesis-failed") {
-      root.notify("Read aloud error", "Piper could not synthesize this selection.")
+      root.notify("OmaYap error", "Piper could not synthesize this selection.")
     }
   }
 
@@ -231,7 +231,7 @@ Item {
     root.restoreCancelled = false
     if (!text || !text.trim()) {
       root.status = "idle"
-      root.notify("Read aloud", "No text selection was available. Select text and try again.")
+      root.notify("OmaYap", "No text selection was available. Select text and try again.")
       return
     }
     root.workerCommand({ command: "read-selection", text: text })
@@ -253,7 +253,7 @@ Item {
       // A stop is deliberately silent: do not turn a canceled capture into a
       // late notification. A normal capture still reports restore failure.
       if (!cancelled)
-        root.notify("Read aloud", "Could not restore the clipboard; copy the selection manually and try again.")
+        root.notify("OmaYap", "Could not restore the clipboard; copy the selection manually and try again.")
       root.status = "idle"
       return
     }
@@ -265,7 +265,7 @@ Item {
     if (notice !== "") {
       root.pendingCapturedText = ""
       root.status = "idle"
-      root.notify("Read aloud", notice)
+      root.notify("OmaYap", notice)
       return
     }
     root.pendingCapturedText = captured
@@ -424,7 +424,7 @@ Item {
       if (root.active && !root.setupRequired) {
         root.status = "error"
         root.errorCode = "worker-exited"
-        root.notify("Read aloud error", "The Piper worker stopped unexpectedly.")
+        root.notify("OmaYap error", "The Piper worker stopped unexpectedly.")
       }
     }
   }
@@ -487,7 +487,7 @@ Item {
         if (!root.plainClipboardTypes(raw)) {
           root.captureStage = "idle"
           root.status = "idle"
-          root.notify("Read aloud", "The clipboard contains non-text data. Copy the text selection manually.")
+          root.notify("OmaYap", "The clipboard contains non-text data. Copy the text selection manually.")
           return
         }
         if (raw.trim() === "") {
@@ -509,7 +509,7 @@ Item {
       if (root.captureStage === "clipboard-types" && exitCode !== 0) {
         root.captureStage = "idle"
         root.status = "idle"
-        root.notify("Read aloud", "The clipboard could not be inspected safely. Copy the selection manually.")
+        root.notify("OmaYap", "The clipboard could not be inspected safely. Copy the selection manually.")
       }
     }
   }
@@ -532,7 +532,7 @@ Item {
       if (root.captureStage === "clipboard-text" && exitCode !== 0) {
         root.captureStage = "idle"
         root.status = "idle"
-        root.notify("Read aloud", "The clipboard could not be read safely. Copy the selection manually.")
+        root.notify("OmaYap", "The clipboard could not be read safely. Copy the selection manually.")
       }
     }
   }

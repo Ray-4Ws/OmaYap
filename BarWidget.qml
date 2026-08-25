@@ -51,7 +51,7 @@ BarWidget {
   function clickAction() {
     if (readAloud) readAloud.toggleSelection()
     else if (state === "setup-required") {
-      Quickshell.execDetached(["omarchy-notification-send", "Read aloud setup required", "Run bin/setup in the installed plugin directory."])
+      Quickshell.execDetached(["omarchy-notification-send", "OmaYap setup required", "Run bin/setup in the installed plugin directory."])
     }
   }
 
@@ -63,7 +63,7 @@ BarWidget {
     active: root.active || root.popupOpen
     foreground: root.stateColor
     useActiveColor: false
-    tooltipText: root.active ? "Stop read aloud" : "Read selected text aloud"
+    tooltipText: root.active ? "Stop OmaYap" : "Read selected text aloud"
     horizontalMargin: 7.5
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.RightButton) root.toggle()
@@ -90,7 +90,7 @@ BarWidget {
         spacing: Style.space(10)
 
         Text {
-          text: "Read aloud"
+          text: "OmaYap"
           color: root.bar ? root.bar.foreground : Color.foreground
           font.family: root.bar ? root.bar.fontFamily : Style.font.family
           font.pixelSize: Style.font.subtitle

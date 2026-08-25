@@ -523,7 +523,7 @@ def self_test(model_path: Path, config_path: Optional[Path]) -> int:
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Omayap local TTS worker")
+    parser = argparse.ArgumentParser(description="OmaYap local TTS worker")
     parser.add_argument("--model", type=Path)
     parser.add_argument("--config", type=Path)
     parser.add_argument("--self-test", action="store_true")
