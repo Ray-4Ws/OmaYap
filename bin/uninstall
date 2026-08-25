@@ -12,7 +12,7 @@ BEGIN_MARKER="-- BEGIN OMAYAP_READ_ALOUD_F10"
 END_MARKER="-- END OMAYAP_READ_ALOUD_F10"
 
 die() {
-  echo "uninstall: $*" >&2
+  echo "OmaYap uninstall: $*" >&2
   exit 1
 }
 
@@ -59,7 +59,7 @@ remove_binding() {
     hyprctl reload >/dev/null 2>&1 || true
     die "Hyprland rejected the edited bindings; the original bindings were restored"
   fi
-  echo "uninstall: removed the tagged F10 binding (backup: $backup)"
+  echo "OmaYap uninstall: removed the tagged F10 binding (backup: $backup)"
 }
 
 safe_purge_path() {
@@ -74,12 +74,12 @@ purge_data() {
   if [[ "${OMAYAP_ASSUME_YES:-0}" != 1 ]]; then
     [[ -t 0 ]] || die "--purge requires an interactive confirmation (set OMAYAP_ASSUME_YES=1 only for a reviewed test)"
     local answer=""
-    read -r -p "Delete Omayap Read aloud runtime and settings? [y/N] " answer
-    [[ "$answer" == "y" || "$answer" == "Y" ]] || { echo "uninstall: purge cancelled"; return 0; }
+    read -r -p "Delete OmaYap runtime and settings? [y/N] " answer
+    [[ "$answer" == "y" || "$answer" == "Y" ]] || { echo "OmaYap uninstall: purge cancelled"; return 0; }
   fi
   safe_purge_path "$DATA_ROOT" "$DATA_HOME"
   safe_purge_path "$CONFIG_ROOT" "$CONFIG_HOME"
-  echo "uninstall: purged only $DATA_ROOT and $CONFIG_ROOT"
+  echo "OmaYap uninstall: purged only $DATA_ROOT and $CONFIG_ROOT"
 }
 
 main() {

@@ -1,8 +1,8 @@
-# Omayap Read Aloud
+# OmaYap
 
-`omayap.read-aloud` is an Omarchy shell plugin that reads the current text
-selection aloud across the desktop. It is local after setup: Piper synthesizes
-with the pinned `en_US-lessac-medium` voice and sends signed 16-bit PCM to
+`OmaYap` is an Omarchy shell plugin (`omayap.read-aloud`) that reads
+the current text selection aloud across the desktop. It is local after setup:
+Piper synthesizes with the pinned `en_US-lessac-medium` voice and sends signed 16-bit PCM to
 PipeWire's `pw-play`.
 
 The plugin is a focused service/bar-widget adaptation of
@@ -19,7 +19,7 @@ Omarchy intentionally does not run plugin hooks or install dependencies. Use
 two explicit phases:
 
 ```bash
-omarchy plugin add https://github.com/Ray-4Ws/omarchy-read-aloud --enable
+omarchy plugin add https://github.com/Ray-4Ws/OmaYap --enable
 ~/.config/omarchy/plugins/omayap.read-aloud/bin/setup
 ```
 

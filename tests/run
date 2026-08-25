@@ -4,6 +4,15 @@ set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
+grep -Fqx -- '  "id": "omayap.read-aloud",' "$ROOT/manifest.json"
+grep -Fqx -- '  "name": "OmaYap",' "$ROOT/manifest.json"
+grep -Fqx -- '    "displayName": "OmaYap",' "$ROOT/manifest.json"
+grep -Fqx -- '# OmaYap' "$ROOT/README.md"
+grep -Fq -- '`OmaYap` is an Omarchy shell plugin' "$ROOT/README.md"
+grep -Fq -- 'https://github.com/Ray-4Ws/OmaYap' "$ROOT/README.md"
+! rg -n -F 'Read aloud setup required' "$ROOT/Service.qml" "$ROOT/BarWidget.qml"
+! rg -n -F 'Read aloud error' "$ROOT/Service.qml" "$ROOT/BarWidget.qml"
+
 python3 -m unittest -v tests.test_worker
 
 if command -v omarchy >/dev/null 2>&1; then
@@ -145,4 +154,4 @@ OMAYAP_ASSUME_YES=1 "$ROOT/bin/uninstall" --purge
 [[ ! -e "$config/omayap-read-aloud" && ! -e "$data/omayap-read-aloud" ]]
 [[ -f "$config/keep/sentinel" && -f "$data/keep/sentinel" ]]
 
-echo "all Omayap Read Aloud tests passed"
+echo "all OmaYap tests passed"
