@@ -12,6 +12,16 @@ grep -Fq -- '`OmaYap` is an Omarchy shell plugin' "$ROOT/README.md"
 grep -Fq -- 'https://github.com/Ray-4Ws/OmaYap' "$ROOT/README.md"
 ! rg -n -F 'Read aloud setup required' "$ROOT/Service.qml" "$ROOT/BarWidget.qml"
 ! rg -n -F 'Read aloud error' "$ROOT/Service.qml" "$ROOT/BarWidget.qml"
+grep -Fq -- 'property bool stopPending: false' "$ROOT/Service.qml"
+grep -Fq -- 'status === "stopping"' "$ROOT/Service.qml"
+[[ "$(grep -Fc -- 'if (root.stopPending) return' "$ROOT/Service.qml")" -eq 2 ]]
+grep -Fq -- 'root.state === "stopping" ? "Stopping OmaYap"' "$ROOT/BarWidget.qml"
+grep -Fq -- 'step: 0.25' "$ROOT/BarWidget.qml"
+grep -Fq -- 'tickCount: 7' "$ROOT/BarWidget.qml"
+grep -Fq -- 'function snapSpeed(value)' "$ROOT/BarWidget.qml"
+grep -Fq -- 'speedSlider.liveValue = root.snapSpeed(value)' "$ROOT/BarWidget.qml"
+grep -Fq -- 'function commitSpeed()' "$ROOT/BarWidget.qml"
+grep -Fq -- 'TextField {' "$ROOT/BarWidget.qml"
 
 python3 -m unittest -v tests.test_worker
 

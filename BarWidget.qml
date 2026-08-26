@@ -10,7 +10,7 @@ BarWidget {
   readonly property string pluginId: "omayap.read-aloud"
   readonly property var readAloud: bar && bar.shell ? bar.shell.serviceFor(root.pluginId) : null
   readonly property string state: readAloud ? String(readAloud.status || "idle") : "setup-required"
-  readonly property bool active: state === "capturing" || state === "loading" || state === "speaking"
+  readonly property bool active: state === "capturing" || state === "loading" || state === "speaking" || state === "stopping"
   readonly property string voiceName: readAloud ? String(readAloud.voiceName || "en_US-lessac-medium") : "en_US-lessac-medium"
   readonly property real speed: readAloud ? Number(readAloud.speed || 1.0) : 1.0
   readonly property int characterCount: readAloud ? Number(readAloud.characterCount || 0) : 0
@@ -20,6 +20,7 @@ BarWidget {
     if (state === "setup-required") return "󰒓"
     if (state === "capturing" || state === "loading") return "󰔟"
     if (state === "speaking") return "󰍬"
+    if (state === "stopping") return "󰅖"
     if (state === "error") return "󰀦"
     return "󰗇"
   }
@@ -29,6 +30,7 @@ BarWidget {
     if (state === "capturing") return "Capturing selection"
     if (state === "loading") return "Loading voice"
     if (state === "speaking") return "Speaking"
+    if (state === "stopping") return "Stopping"
     if (state === "error") return "Error"
     return "Ready"
   }
@@ -48,6 +50,38 @@ BarWidget {
   function close() { popupOpen = false }
   function toggle() { popupOpen = !popupOpen }
 
+  function formatSpeed(value) {
+    var number = Number(value)
+    if (!isFinite(number)) number = 1.0
+    // The worker persists and reports three decimal places. Keep the two
+    // decimal appearance for the common anchor values, while retaining a
+    // user's third decimal when they enter one explicitly.
+    var formatted = number.toFixed(3).replace(/0+$/, "").replace(/\.$/, "")
+    while (formatted.indexOf(".") === -1 || formatted.split(".")[1].length < 2)
+      formatted += formatted.indexOf(".") === -1 ? ".0" : "0"
+    return formatted
+  }
+
+  function commitSpeed() {
+    var raw = speedValue.text.trim()
+    var typed = Number(raw)
+    var current = root.speed
+    if (raw === "" || !isFinite(typed)) typed = current
+    typed = Math.max(0.5, Math.min(2.0, typed))
+    if (root.readAloud && typed !== current) root.readAloud.setSpeed(typed)
+    speedValue.text = root.formatSpeed(root.readAloud ? root.readAloud.speed : typed)
+    speedValue.deselect()
+  }
+
+  function snapSpeed(value) {
+    var number = Number(value)
+    if (!isFinite(number)) number = root.speed
+    number = Math.max(0.5, Math.min(2.0, number))
+    return 0.5 + Math.round((number - 0.5) / 0.25) * 0.25
+  }
+
+  onSpeedChanged: if (speedValue && !speedValue.activeFocus) speedValue.text = root.formatSpeed(root.speed)
+
   function clickAction() {
     if (readAloud) readAloud.toggleSelection()
     else if (state === "setup-required") {
@@ -63,7 +97,7 @@ BarWidget {
     active: root.active || root.popupOpen
     foreground: root.stateColor
     useActiveColor: false
-    tooltipText: root.active ? "Stop OmaYap" : "Read selected text aloud"
+    tooltipText: root.state === "stopping" ? "Stopping OmaYap" : (root.active ? "Stop OmaYap" : "Read selected text aloud")
     horizontalMargin: 7.5
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.RightButton) root.toggle()
@@ -132,25 +166,52 @@ BarWidget {
         PanelSlider {
           id: speedSlider
           bar: root.bar
-          width: parent.width - speedValue.implicitWidth - Style.space(55)
+          width: Math.max(Style.space(70), parent.width - speedValue.width - speedUnit.implicitWidth - Style.space(60))
           minimum: 0.5
           maximum: 2.0
-          step: 0.05
+          step: 0.25
+          tickCount: 7
           value: root.speed
           anchors.verticalCenter: parent.verticalCenter
+          onMoved: function(value) {
+            // PanelSlider intentionally leaves snapping to its caller so it
+            // can also support continuous controls. OmaYap's slider is a
+            // seven-anchor control, so snap both its knob and its committed
+            // value while dragging.
+            speedSlider.liveValue = root.snapSpeed(value)
+          }
           onReleased: function(value) {
-            if (root.readAloud) root.readAloud.setSpeed(value)
+            if (root.readAloud) root.readAloud.setSpeed(root.snapSpeed(value))
           }
         }
 
-        Text {
+        TextField {
           id: speedValue
-          text: root.speed.toFixed(2) + "×"
+          text: root.formatSpeed(root.speed)
+          foreground: root.bar ? root.bar.foreground : Color.foreground
+          accent: root.bar ? root.bar.barForeground : Color.accent
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          font.pixelSize: Style.font.bodySmall
+          width: Style.space(52)
+          implicitHeight: Style.spacing.controlHeight
+          horizontalAlignment: Text.AlignRight
+          anchors.verticalCenter: parent.verticalCenter
+          selectByMouse: true
+          inputMethodHints: Qt.ImhFormattedNumbersOnly
+          onActiveFocusChanged: {
+            if (activeFocus) selectAll()
+            else root.commitSpeed()
+          }
+          onAccepted: root.commitSpeed()
+          onEditingFinished: root.commitSpeed()
+        }
+
+        Text {
+          id: speedUnit
+          text: "×"
           color: root.bar ? root.bar.foreground : Color.foreground
           font.family: root.bar ? root.bar.fontFamily : Style.font.family
           font.pixelSize: Style.font.bodySmall
-          width: Style.space(44)
-          horizontalAlignment: Text.AlignRight
           anchors.verticalCenter: parent.verticalCenter
         }
       }
