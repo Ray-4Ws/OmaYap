@@ -38,7 +38,12 @@ Item {
   property real speed: 1.0
   property int characterCount: 0
   property string errorCode: "runtime-missing"
-  readonly property bool active: status === "capturing" || status === "loading" || status === "speaking"
+  // Keep the control busy until the worker acknowledges stop.  The worker
+  // may still be draining/canceling a synthesis thread after the button is
+  // pressed; treating that interval as idle lets a second click start a new
+  // selection before the old one is gone.
+  property bool stopPending: false
+  readonly property bool active: status === "capturing" || status === "loading" || status === "speaking" || status === "stopping"
 
   // Capture state is intentionally transient.  No selection is written to a
   // file or included in a process command line; it is sent only through the
@@ -166,9 +171,22 @@ Item {
     if (!parsed || parsed.event !== "state") return
 
     var nextStatus = String(parsed.status || "")
-    if (["setup-required", "idle", "capturing", "loading", "speaking", "error"].indexOf(nextStatus) !== -1)
+    if (["setup-required", "idle", "capturing", "loading", "speaking", "stopping", "error"].indexOf(nextStatus) !== -1)
       root.status = nextStatus
     root.speed = root.clampSpeed(parsed.speed)
+
+    // A stop command is acknowledged by the worker's idle (or setup-required)
+    // state. Ignore stale speaking/loading/error events that were already in
+    // stdout when stop was pressed, so they cannot re-enable the read action
+    // or display a cancellation as a failure.
+    if (root.stopPending && nextStatus !== "idle" && nextStatus !== "setup-required") {
+      root.status = "stopping"
+      root.characterCount = 0
+      root.errorCode = ""
+      return
+    }
+    if (root.stopPending) root.stopPending = false
+
     root.characterCount = Math.max(0, Number(parsed.characters || 0))
     root.errorCode = String(parsed.errorCode || "")
 
@@ -192,7 +210,7 @@ Item {
     // A fallback capture may still be restoring the user's clipboard. Do not
     // start another capture until that asynchronous restore has completed; an
     // old wl-copy exit would otherwise clear the new capture's state.
-    if (root.captureStage === "restore") return
+    if (root.captureStage === "restore" || root.stopPending) return
     if (root.setupRequired) {
       root.setupHint()
       return
@@ -209,17 +227,20 @@ Item {
   }
 
   function toggleSelection() {
+    if (root.stopPending) return
     if (root.active) root.stop()
     else root.readSelection()
   }
 
   function stop() {
+    if (root.stopPending) return
     root.cancelCapture(true)
     root.pendingWorkerCommands = []
-    if (workerProc.running) workerProc.write(JSON.stringify({ command: "stop" }) + "\n")
+    root.stopPending = workerProc.running
+    if (root.stopPending) workerProc.write(JSON.stringify({ command: "stop" }) + "\n")
     root.characterCount = 0
     root.errorCode = ""
-    root.status = root.setupRequired ? "setup-required" : "idle"
+    root.status = root.stopPending ? "stopping" : (root.setupRequired ? "setup-required" : "idle")
   }
 
   function submitCapturedText() {
@@ -421,6 +442,16 @@ Item {
       root.flushWorkerCommands()
     }
     onExited: function(exitCode) {
+      if (root.stopPending) {
+        // The worker normally stays alive for the next read, but if it exits
+        // while honoring stop, finish the UI transition without a spurious
+        // worker-exited notification.
+        root.stopPending = false
+        root.characterCount = 0
+        root.errorCode = ""
+        root.status = root.setupRequired ? "setup-required" : "idle"
+        return
+      }
       if (root.active && !root.setupRequired) {
         root.status = "error"
         root.errorCode = "worker-exited"
