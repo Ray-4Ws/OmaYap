@@ -3,7 +3,7 @@
   "id": "omayap.read-aloud",
   "name": "OmaYap",
   "version": "1.0.0",
-  "author": "OmaYap",
+  "author": "Ray-4Ws",
   "license": "MIT",
   "description": "Read the current text selection aloud locally with Piper neural TTS.",
   "kinds": [
