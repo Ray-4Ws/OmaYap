@@ -17,6 +17,14 @@ from typing import Callable, Iterable, Optional, Sequence
 PLAIN_MIME_TYPES = frozenset(
     {"text/plain", "text/plain;charset=utf-8", "utf8_string", "string", "text"}
 )
+# Keep this in sync with the caps used by Service.qml and bounded_capture.py.
+# The selection cap is deliberately large enough for 20,001 four-byte UTF-8
+# code points so QML can perform the user-facing Unicode count before sending
+# anything to the worker.
+OVERFLOW_EXIT_CODE = 125
+MAX_SELECTION_BYTES = 20_001 * 4
+MAX_MIME_BYTES = 4_096
+MAX_CLIPBOARD_BYTES = 1 << 20
 
 
 @dataclass(frozen=True)
@@ -68,10 +76,14 @@ def capture_selection(
     """
 
     primary = _run(run, ["wl-paste", "--primary", "--type", "text/plain", "--no-newline"])
+    if primary.returncode == OVERFLOW_EXIT_CODE:
+        return CaptureResult(reason="selection-too-large")
     if primary.returncode == 0 and primary.stdout:
         return CaptureResult(text=primary.stdout, source="primary")
 
     mime = _run(run, ["wl-paste", "--list-types"])
+    if mime.returncode == OVERFLOW_EXIT_CODE:
+        return CaptureResult(reason="clipboard-inspection-too-large")
     if mime.returncode != 0:
         return CaptureResult(reason="clipboard-inspection-failed")
     mime_types = _types(mime.stdout)
@@ -81,6 +93,10 @@ def capture_selection(
     before = ""
     if mime_types:
         snapshot = _run(run, ["wl-paste", "--no-newline", "--type", "text/plain"])
+        if snapshot.returncode == OVERFLOW_EXIT_CODE:
+            # Refuse before wl-copy or wtype: a truncated backup could not be
+            # restored safely after the fallback clears the clipboard.
+            return CaptureResult(reason="clipboard-too-large", clipboard_touched=False)
         if snapshot.returncode != 0:
             return CaptureResult(reason="clipboard-read-failed", clipboard_touched=False)
         before = snapshot.stdout
@@ -98,6 +114,9 @@ def capture_selection(
     if copied.returncode == 0:
         for _ in range(max(0, int(poll_limit))):
             current = _run(run, ["wl-paste", "--no-newline", "--type", "text/plain"])
+            if current.returncode == OVERFLOW_EXIT_CODE:
+                reason = "selection-too-large"
+                break
             if current.returncode == 0 and current.stdout:
                 captured = current.stdout
                 reason = ""
@@ -114,6 +133,13 @@ def capture_selection(
         return CaptureResult(
             reason="clipboard-restore-failed",
             restored=False,
+            clipboard_touched=True,
+            terminal=terminal,
+        )
+    if reason == "selection-too-large":
+        return CaptureResult(
+            reason=reason,
+            restored=True,
             clipboard_touched=True,
             terminal=terminal,
         )
