@@ -12,7 +12,7 @@ Item {
   property string omarchyPath: ""
 
   readonly property string pluginId: "omayap.read-aloud"
-  readonly property string pluginVersion: "1.0.0"
+  readonly property string pluginVersion: "1.1.0"
   readonly property string voiceName: "en_US-lessac-medium"
   readonly property int maxCharacters: 20000
   // The wrapper reads cap+1 bytes and emits no stdout on overflow.  This
@@ -51,6 +51,11 @@ Item {
   // pressed; treating that interval as idle lets a second click start a new
   // selection before the old one is gone.
   property bool stopPending: false
+  // A warm worker is useful while reading, but retaining ONNX Runtime's
+  // allocator and model while the plugin is idle is expensive.  The worker
+  // exits after this quiet period; the QML service and bar remain loaded.
+  readonly property int workerIdleTimeoutMs: 60000
+  property bool expectedWorkerExit: false
   readonly property bool active: status === "capturing" || status === "loading" || status === "speaking" || status === "stopping"
 
   // Capture state is intentionally transient.  No selection is written to a
@@ -217,7 +222,11 @@ Item {
   function setSpeed(value) {
     root.speed = root.clampSpeed(value)
     root.persistSpeed()
-    root.workerCommand({ command: "set-speed", speed: root.speed })
+    // Persisting a setting must not wake the model.  A newly started worker
+    // receives the current speed from onStarted; a warm worker gets the
+    // update immediately for its next chunk.
+    if (workerProc.running && !root.expectedWorkerExit)
+      root.workerCommand({ command: "set-speed", speed: root.speed })
     return root.speed
   }
 
@@ -246,6 +255,20 @@ Item {
 
   function workerCommand(command) {
     if (root.setupRequired) return
+    // A speed change while the worker is cold only updates settings and must
+    // not start it.
+    if (command && command.command === "set-speed" && !workerProc.running) return
+    // A shutdown may already be in the worker's stdin pipe when the user
+    // starts a new read at the exact eviction boundary.  Queue that read for
+    // the fresh worker instead of writing behind shutdown.
+    if (root.expectedWorkerExit) {
+      var evictionQueue = root.pendingWorkerCommands
+      evictionQueue.push(command)
+      root.pendingWorkerCommands = evictionQueue
+      return
+    }
+    workerIdleTimer.stop()
+    root.expectedWorkerExit = false
     if (!workerProc.running) {
       var queue = root.pendingWorkerCommands
       queue.push(command)
@@ -297,6 +320,11 @@ Item {
     root.characterCount = Math.max(0, Number(parsed.characters || 0))
     root.errorCode = String(parsed.errorCode || "")
 
+    if (["idle", "error", "setup-required"].indexOf(nextStatus) !== -1)
+      root.armIdleEviction()
+    else
+      workerIdleTimer.stop()
+
     if (root.errorCode === "selection-too-long") {
       var actual = Math.max(0, Number(parsed.actual || 0))
       var limit = Math.max(0, Number(parsed.limit || root.maxCharacters))
@@ -347,6 +375,7 @@ Item {
 
   function stop() {
     if (root.stopPending) return
+    workerIdleTimer.stop()
     root.cancelCapture(true)
     root.pendingWorkerCommands = []
     root.stopPending = workerProc.running
@@ -354,6 +383,29 @@ Item {
     root.characterCount = 0
     root.errorCode = ""
     root.status = root.stopPending ? "stopping" : (root.setupRequired ? "setup-required" : "idle")
+  }
+
+  function armIdleEviction() {
+    if (!workerProc.running || root.stopPending || root.captureStage !== "idle") return
+    if (["idle", "error", "setup-required"].indexOf(root.status) === -1) return
+    workerIdleTimer.restart()
+  }
+
+  function evictIdleWorker() {
+    if (!workerProc.running) return
+    if (root.stopPending || root.captureStage !== "idle"
+        || ["idle", "error", "setup-required"].indexOf(root.status) === -1) {
+      // A capture or a late state transition raced the timer.  Keep the
+      // worker alive for now and check again rather than losing eviction.
+      workerIdleTimer.restart()
+      return
+    }
+    root.expectedWorkerExit = true
+    workerProc.write(JSON.stringify({ command: "shutdown" }) + "\n")
+    // Some ONNX Runtime builds spend longer than a user-visible interval in
+    // native teardown.  The worker is dedicated to OmaYap, so terminate it
+    // after a short grace period to guarantee the model is actually evicted.
+    workerEvictionKillTimer.restart()
   }
 
   function submitCapturedText() {
@@ -728,7 +780,7 @@ Item {
     }
   }
 
-  // ---------------------------------------------- persistent Piper worker
+  // ---------------------------------------------- lazy Piper worker
 
   Process {
     id: workerProc
@@ -737,10 +789,33 @@ Item {
       onRead: function(line) { root.handleWorkerLine(line) }
     }
     onStarted: {
+      root.expectedWorkerExit = false
+      workerIdleTimer.stop()
       write(JSON.stringify({ command: "set-speed", speed: root.speed }) + "\n")
       root.flushWorkerCommands()
     }
     onExited: function(exitCode) {
+      workerIdleTimer.stop()
+      workerEvictionKillTimer.stop()
+      if (root.expectedWorkerExit) {
+        // Normal cold-idle eviction is not an error.  The service itself stays
+        // loaded and the next read starts a fresh worker with current speed.
+        var evictionWasStopping = root.stopPending
+        root.expectedWorkerExit = false
+        root.stopPending = false
+        root.characterCount = 0
+        root.errorCode = ""
+        root.status = evictionWasStopping
+          ? (root.setupRequired ? "setup-required" : "idle")
+          : (root.captureStage !== "idle"
+            ? "capturing"
+            : (root.setupRequired ? "setup-required" : "idle"))
+        var queuedAfterEviction = root.pendingWorkerCommands
+        root.pendingWorkerCommands = []
+        for (var queuedIndex = 0; queuedIndex < queuedAfterEviction.length; queuedIndex++)
+          root.workerCommand(queuedAfterEviction[queuedIndex])
+        return
+      }
       if (root.stopPending) {
         // The worker normally stays alive for the next read, but if it exits
         // while honoring stop, finish the UI transition without a spurious
@@ -749,6 +824,7 @@ Item {
         root.characterCount = 0
         root.errorCode = ""
         root.status = root.setupRequired ? "setup-required" : "idle"
+        root.armIdleEviction()
         return
       }
       if (root.active && !root.setupRequired) {
@@ -756,6 +832,22 @@ Item {
         root.errorCode = "worker-exited"
         root.notify("OmaYap error", "The Piper worker stopped unexpectedly.")
       }
+    }
+  }
+
+  Timer {
+    id: workerIdleTimer
+    interval: root.workerIdleTimeoutMs
+    repeat: false
+    onTriggered: root.evictIdleWorker()
+  }
+
+  Timer {
+    id: workerEvictionKillTimer
+    interval: 500
+    repeat: false
+    onTriggered: {
+      if (root.expectedWorkerExit && workerProc.running) workerProc.running = false
     }
   }
 

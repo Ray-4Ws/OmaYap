@@ -104,17 +104,66 @@ def sentence_chunks(text: str, target: int = CHUNK_TARGET) -> Iterator[str]:
         start = max(end, start + 1)
 
 
-def _load_piper_voice(model_path: Path, config_path: Optional[Path] = None) -> Any:
-    """Load Piper lazily, keeping import and model startup out of idle time."""
+def _load_piper_voice(
+    model_path: Path,
+    config_path: Optional[Path] = None,
+    *,
+    legacy_defaults: bool = False,
+) -> Any:
+    """Load Piper lazily with bounded ONNX Runtime memory behavior.
+
+    ``PiperVoice.load`` creates an ONNX Runtime session with all default
+    allocators and thread pools.  Those defaults are useful for general
+    inference, but are needlessly expensive for one small, serialized voice.
+    Constructing the session here lets the normal worker use the same public
+    Piper classes while opting into Piper's low-memory settings.  The
+    ``legacy_defaults`` escape hatch exists only for the memory benchmark; it
+    is not exposed through the worker protocol or the desktop service.
+    """
 
     try:
-        from piper import PiperVoice  # type: ignore
+        from piper import PiperConfig, PiperVoice  # type: ignore
+        import onnxruntime  # type: ignore
     except Exception as exc:  # pragma: no cover - exercised by setup smoke tests
         raise RuntimeError("piper-runtime-unavailable") from exc
 
     if not model_path.is_file() or (config_path is not None and not config_path.is_file()):
         raise FileNotFoundError("voice-model-missing")
-    return PiperVoice.load(model_path, config_path)
+    if config_path is None:
+        config_path = Path(f"{model_path}.json")
+
+    try:
+        with config_path.open("r", encoding="utf-8") as config_file:
+            config_dict = json.load(config_file)
+        voice_config = PiperConfig.from_dict(config_dict)
+    except (OSError, TypeError, ValueError, KeyError) as exc:
+        raise RuntimeError("voice-config-invalid") from exc
+
+    session_options = onnxruntime.SessionOptions()
+    if not legacy_defaults:
+        # These are the settings used by Piper's native low-memory path.  A
+        # single TTS request is serialized by Worker, so large execution
+        # thread pools and the CPU arena only add retained memory.
+        session_options.enable_cpu_mem_arena = False
+        session_options.enable_mem_pattern = False
+        session_options.intra_op_num_threads = 1
+        session_options.inter_op_num_threads = 1
+        session_options.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
+        session_options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_BASIC
+
+    session = onnxruntime.InferenceSession(
+        str(model_path),
+        sess_options=session_options,
+        providers=["CPUExecutionProvider"],
+    )
+    # PiperVoice.load uses Path.cwd() when download_dir is omitted.  Preserve
+    # that behavior while letting the constructor retain Piper's default
+    # espeak-ng data directory.
+    return PiperVoice(
+        config=voice_config,
+        session=session,
+        download_dir=Path.cwd(),
+    )
 
 
 def _synthesis_config(speed: float) -> Any:
@@ -212,6 +261,19 @@ class AudioSink:
             pass
 
 
+class DiscardAudioSink:
+    """Sink used only by the memory benchmark; never starts a player."""
+
+    def write(self, _data: bytes, _sample_rate: int) -> None:
+        return
+
+    def finish(self) -> None:
+        return
+
+    def stop(self) -> None:
+        return
+
+
 class Worker:
     """Threaded command worker with generation-based cancellation."""
 
@@ -223,12 +285,16 @@ class Worker:
         voice_loader: Optional[Callable[[], Any]] = None,
         player_factory: Optional[Callable[[], AudioSink]] = None,
         emitter: Optional[Callable[[dict[str, Any]], None]] = None,
+        chunk_target: int = CHUNK_TARGET,
+        legacy_defaults: bool = False,
     ) -> None:
         self.model_path = model_path
         self.config_path = config_path
         self._voice_loader = voice_loader
         self._player_factory = player_factory or AudioSink
         self._emit_callback = emitter or self._write_event
+        self._chunk_target = max(1, int(chunk_target))
+        self._legacy_defaults = legacy_defaults
         self._voice: Any = None
         self._voice_loaded = False
         self._lock = threading.RLock()
@@ -344,6 +410,13 @@ class Worker:
         with self._lock:
             self._shutdown = True
         self.stop(emit=False)
+        # Cold-idle eviction is a process lifecycle boundary.  Drop the
+        # native session before leaving the stdin loop so ONNX Runtime can
+        # release its allocators deterministically instead of waiting for
+        # interpreter teardown.
+        with self._voice_condition:
+            self._voice = None
+            self._voice_loaded = False
 
     # -------------------------------------------------------- synthesis loop
 
@@ -366,7 +439,11 @@ class Worker:
             elif self.model_path is None:
                 raise FileNotFoundError("voice-model-missing")
             else:
-                voice = _load_piper_voice(self.model_path, self.config_path)
+                voice = _load_piper_voice(
+                    self.model_path,
+                    self.config_path,
+                    legacy_defaults=self._legacy_defaults,
+                )
             if voice is None:
                 raise RuntimeError("voice-load-failed")
         except FileNotFoundError as exc:
@@ -423,7 +500,8 @@ class Worker:
             with self._lock:
                 self._sink = sink
             self._emit("speaking")
-            for chunk in sentence_chunks(text):
+            first_audio = True
+            for chunk in sentence_chunks(text, target=self._chunk_target):
                 if not self._active(generation):
                     return
                 with self._lock:
@@ -441,6 +519,12 @@ class Worker:
                     data = self._audio_bytes(audio)
                     if data:
                         sink.write(data, self._sample_rate(audio, voice))
+                        if first_audio and self._active(generation):
+                            first_audio = False
+                            # This remains metadata-only and allows the
+                            # benchmark to distinguish Piper's first audio
+                            # from the earlier "speaking" state.
+                            self._emit("speaking", audioStarted=True)
             if self._active(generation):
                 completed = True
         except RuntimeError as exc:
@@ -541,6 +625,22 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="OmaYap local TTS worker")
     parser.add_argument("--model", type=Path)
     parser.add_argument("--config", type=Path)
+    parser.add_argument(
+        "--chunk-target",
+        type=int,
+        default=CHUNK_TARGET,
+        help="approximate synthesis chunk size (benchmarking only)",
+    )
+    parser.add_argument(
+        "--legacy-defaults",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--discard-audio",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--self-test", action="store_true")
     return parser.parse_args(argv)
 
@@ -554,7 +654,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         if args.model is None:
             return 1
         return self_test(args.model, args.config)
-    worker = Worker(args.model, args.config)
+    worker = Worker(
+        args.model,
+        args.config,
+        chunk_target=args.chunk_target,
+        legacy_defaults=args.legacy_defaults,
+        player_factory=DiscardAudioSink if args.discard_audio else None,
+    )
     return worker.run()
 
 

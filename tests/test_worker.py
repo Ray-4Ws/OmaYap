@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import threading
 import time
+import types
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,7 +16,22 @@ from unittest.mock import patch
 
 from share.bounded_capture import OVERFLOW_EXIT_CODE
 from share.capture import CommandResult, capture_selection
-from worker.worker import AudioSink, MAX_CHARS, Worker, clamp_speed, sentence_chunks
+from benchmarks.memory import (
+    benchmark_text,
+    parse_smaps_rollup,
+    parse_status_threads,
+    render,
+    run_case,
+)
+from worker.worker import (
+    AudioSink,
+    DiscardAudioSink,
+    MAX_CHARS,
+    Worker,
+    _load_piper_voice,
+    clamp_speed,
+    sentence_chunks,
+)
 
 
 @dataclass
@@ -94,6 +111,12 @@ class AudioSinkTests(unittest.TestCase):
         self.assertTrue(killed.is_set())
         self.assertLess(elapsed, 0.25, "stop waited for the blocking audio write")
 
+    def test_benchmark_discard_sink_never_starts_a_player(self):
+        sink = DiscardAudioSink()
+        sink.write(b"audio", 22050)
+        sink.finish()
+        sink.stop()
+
 
 def wait_for(predicate, timeout: float = 2.0) -> None:
     deadline = time.monotonic() + timeout
@@ -125,6 +148,21 @@ class WorkerTests(unittest.TestCase):
         wait_for(lambda: any(e.get("status") == "idle" and e.get("characters") == 0 for e in events))
         self.assertGreaterEqual(len(voice.calls), 2)
         self.assertEqual(voice.calls[0][1].get("length_scale"), 1.0)
+        self.assertTrue(any(e.get("audioStarted") is True for e in events))
+
+    def test_chunk_target_is_configurable_for_benchmarking(self):
+        events: list[dict[str, Any]] = []
+        voice = FakeVoice()
+        worker = Worker(
+            voice_loader=lambda: voice,
+            player_factory=FakeSink,
+            emitter=events.append,
+            chunk_target=200,
+        )
+        worker.read_selection("word " * 500)
+        wait_for(lambda: any(e.get("status") == "idle" and e.get("characters") == 0 for e in events))
+        self.assertGreater(len(voice.calls), 1)
+        self.assertLessEqual(max(len(text) for text, _config in voice.calls), 200)
 
     def test_sentence_chunking_prefers_sentence_and_limits_long_words(self):
         chunks = list(sentence_chunks("First sentence. Second sentence! Third sentence?", target=800))
@@ -255,6 +293,152 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(calls, 1)
         self.assertFalse(any(e.get("errorCode") == "voice-unavailable" for e in events))
 
+class PiperLoaderTests(unittest.TestCase):
+    def test_low_memory_session_options_are_explicit(self):
+        class FakeSessionOptions:
+            def __init__(self):
+                self.enable_cpu_mem_arena = True
+                self.enable_mem_pattern = True
+                self.intra_op_num_threads = 0
+                self.inter_op_num_threads = 0
+                self.execution_mode = "default"
+                self.graph_optimization_level = "extended"
+
+        class FakeConfig:
+            @staticmethod
+            def from_dict(value):
+                return ("config", value)
+
+        class FakeVoice:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        sessions = []
+
+        def inference_session(model, *, sess_options, providers):
+            sessions.append((model, sess_options, providers))
+            return "session"
+
+        fake_piper = types.ModuleType("piper")
+        fake_piper.PiperConfig = FakeConfig
+        fake_piper.PiperVoice = FakeVoice
+        fake_ort = types.ModuleType("onnxruntime")
+        fake_ort.SessionOptions = FakeSessionOptions
+        fake_ort.ExecutionMode = types.SimpleNamespace(ORT_SEQUENTIAL="sequential")
+        fake_ort.GraphOptimizationLevel = types.SimpleNamespace(ORT_ENABLE_BASIC="basic")
+        fake_ort.InferenceSession = inference_session
+
+        with tempfile.TemporaryDirectory() as directory:
+            model = Path(directory) / "voice.onnx"
+            config = Path(directory) / "voice.onnx.json"
+            model.write_bytes(b"model")
+            config.write_text('{"audio": {"sample_rate": 22050}}', encoding="utf-8")
+            with patch.dict(sys.modules, {"piper": fake_piper, "onnxruntime": fake_ort}):
+                voice = _load_piper_voice(model, config)
+
+        options = sessions[0][1]
+        self.assertFalse(options.enable_cpu_mem_arena)
+        self.assertFalse(options.enable_mem_pattern)
+        self.assertEqual(options.intra_op_num_threads, 1)
+        self.assertEqual(options.inter_op_num_threads, 1)
+        self.assertEqual(options.execution_mode, "sequential")
+        self.assertEqual(options.graph_optimization_level, "basic")
+        self.assertEqual(sessions[0][2], ["CPUExecutionProvider"])
+        self.assertEqual(voice.kwargs["session"], "session")
+
+    def test_legacy_defaults_are_only_an_explicit_benchmark_mode(self):
+        class FakeSessionOptions:
+            def __init__(self):
+                self.enable_cpu_mem_arena = "default"
+                self.enable_mem_pattern = "default"
+                self.intra_op_num_threads = "default"
+                self.inter_op_num_threads = "default"
+                self.execution_mode = "default"
+                self.graph_optimization_level = "default"
+
+        class FakeConfig:
+            @staticmethod
+            def from_dict(value):
+                return value
+
+        class FakeVoice:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        captured = []
+        fake_piper = types.ModuleType("piper")
+        fake_piper.PiperConfig = FakeConfig
+        fake_piper.PiperVoice = FakeVoice
+        fake_ort = types.ModuleType("onnxruntime")
+        fake_ort.SessionOptions = FakeSessionOptions
+        fake_ort.ExecutionMode = types.SimpleNamespace(ORT_SEQUENTIAL="sequential")
+        fake_ort.GraphOptimizationLevel = types.SimpleNamespace(ORT_ENABLE_BASIC="basic")
+        fake_ort.InferenceSession = lambda model, *, sess_options, providers: captured.append(sess_options) or "session"
+
+        with tempfile.TemporaryDirectory() as directory:
+            model = Path(directory) / "voice.onnx"
+            config = Path(directory) / "voice.onnx.json"
+            model.write_bytes(b"model")
+            config.write_text("{}", encoding="utf-8")
+            with patch.dict(sys.modules, {"piper": fake_piper, "onnxruntime": fake_ort}):
+                _load_piper_voice(model, config, legacy_defaults=True)
+
+        options = captured[0]
+        self.assertEqual(options.enable_cpu_mem_arena, "default")
+        self.assertEqual(options.enable_mem_pattern, "default")
+        self.assertEqual(options.intra_op_num_threads, "default")
+        self.assertEqual(options.inter_op_num_threads, "default")
+        self.assertEqual(options.execution_mode, "default")
+        self.assertEqual(options.graph_optimization_level, "default")
+
+
+class BenchmarkTests(unittest.TestCase):
+    def test_proc_parsers_and_text_generator_are_bounded(self):
+        metrics = parse_smaps_rollup("Pss: 123 kB\nPrivate_Dirty: 45 kB\nAnonymous: 67 kB\n")
+        self.assertEqual(metrics, {"Pss": 123, "Private_Dirty": 45, "Anonymous": 67})
+        self.assertEqual(parse_status_threads("Name:\tworker\nThreads:\t3\n"), 3)
+        self.assertEqual(len(benchmark_text(20000)), 20000)
+        self.assertNotIn("\n", benchmark_text(200))
+
+    def test_fake_worker_run_reports_only_metadata(self):
+        fake_source = (
+            "import json, sys\n"
+            "for line in sys.stdin:\n"
+            "    message = json.loads(line)\n"
+            "    if message.get('command') == 'read-selection':\n"
+            "        for event in ({'event':'state','status':'loading','characters':5}, {'event':'state','status':'speaking','characters':5,'audioStarted':True}, {'event':'state','status':'idle','characters':0}):\n"
+            "            print(json.dumps(event), flush=True)\n"
+            "    elif message.get('command') == 'shutdown':\n"
+            "        break\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            fake_worker = Path(directory) / "fake-worker.py"
+            fake_worker.write_text(fake_source, encoding="utf-8")
+            result = run_case(
+                python=Path(sys.executable),
+                worker=fake_worker,
+                model=Path(directory) / "unused.onnx",
+                config=Path(directory) / "unused.json",
+                length=200,
+                chunk_target=200,
+                repetition=1,
+                legacy_defaults=False,
+                timeout=2,
+                sample_interval=0.01,
+            )
+        self.assertTrue(result.completed)
+        self.assertFalse(result.error_code)
+        self.assertIsNotNone(result.first_status_ms)
+        self.assertIsNotNone(result.first_audio_ms)
+        self.assertIsNotNone(result.total_ms)
+        self.assertGreaterEqual(result.total_ms, result.first_audio_ms)
+        self.assertGreaterEqual(result.metric_samples, 1)
+        rendered = render([result], "json")
+        self.assertNotIn("benchmark sentence", rendered)
+        self.assertNotIn("text", rendered)
+
+
+class WorkerProtocolTests(unittest.TestCase):
     def test_newline_json_protocol_emits_metadata_only(self):
         worker_path = Path(__file__).resolve().parents[1] / "worker" / "worker.py"
         secret = "protocol selection must stay private"
