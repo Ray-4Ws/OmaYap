@@ -94,7 +94,9 @@ four-byte UTF-8 code points), active-window metadata at 16 KiB, and the
 temporary clipboard backup at 1 MiB. The helper kills and reaps an overflowing
 producer and emits no partial stdout. The worker and QML service then enforce
 a 20,000-Unicode-code-point limit; an oversized selection is rejected in full
-and the notification reports only fixed safe count metadata. An oversized
+and, when the bounded read completes, the notification reports the exact
+code-point count and allowed limit. A producer that overflows its byte cap has
+no usable count and gets only a fixed-limit notification. An oversized
 clipboard backup is refused before the clipboard is cleared, so it can never
 be restored truncated. Empty/stale selections are not spoken.
 

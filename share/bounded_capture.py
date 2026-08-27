@@ -31,7 +31,13 @@ MAX_CAP = 16 * 1024 * 1024
 
 
 def _reap_after_kill(process: subprocess.Popen[bytes]) -> None:
-    """Kill and reap a producer, tolerating races with a fast exit."""
+    """Kill a producer and make a bounded attempt to reap it.
+
+    A normal child is reaped by the timed wait.  If an unusual platform race
+    still prevents that wait from completing, the wrapper must exit rather
+    than wait forever; closing its pipe and exiting lets the OS reparent and
+    reap the already-killed child.
+    """
 
     try:
         process.kill()
@@ -40,12 +46,10 @@ def _reap_after_kill(process: subprocess.Popen[bytes]) -> None:
     try:
         process.wait(timeout=2)
     except subprocess.TimeoutExpired:
-        # A direct child should be reapable after SIGKILL.  Do not leave the
-        # wrapper waiting forever if a platform reports an unusual race.
-        try:
-            process.wait()
-        except OSError:
-            pass
+        # SIGKILL has already been sent.  Do not use an unbounded wait here:
+        # bounded capture must never turn an unusual process race into a
+        # hung shell.  The caller closes the pipe before returning.
+        return
 
 
 def bounded_run(argv: Sequence[str], cap: int) -> int:

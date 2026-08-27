@@ -159,6 +159,20 @@ Item {
     root.notify("OmaYap selection too long", Number(actual).toLocaleString() + " characters selected; maximum is " + root.maxCharacters.toLocaleString() + ".")
   }
 
+  function rejectOversizedCapture() {
+    root.pendingCapturedText = ""
+    root.captureStage = "idle"
+    root.clipboardBefore = ""
+    root.clipboardCleared = false
+    root.restoreCancelled = false
+    root.characterCount = 0
+    root.status = "idle"
+    root.errorCode = "selection-too-long"
+    // A byte-overflowing producer emitted no usable text, so its exact
+    // Unicode count is unknown.  Report only the fixed safe limit.
+    root.notify("OmaYap selection too long", "Selection exceeds the 20,000-character maximum. No text was read.")
+  }
+
   function statusJson() {
     return JSON.stringify({
       status: root.status,
@@ -558,7 +572,7 @@ Item {
   function handlePrimaryText(exitCode, raw) {
     if (root.captureStage !== "primary-text" || root.primaryTextSerial !== root.captureSerial) return
     if (Number(exitCode) === root.boundedOverflowExitCode) {
-      root.rejectCapturedText(20001)
+      root.rejectOversizedCapture()
       return
     }
     if (Number(exitCode) !== 0) {
