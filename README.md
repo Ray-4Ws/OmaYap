@@ -46,6 +46,12 @@ The model is about 63 MB and setup needs network access. Runtime and model data
 are private (`0700` directories, `0600` files). This repository does not run
 setup during development or plugin installation.
 
+The worker is loaded on the first read and exits after 60 seconds without a
+reading. The QML service and bar stay loaded, so this releases Piper and
+ONNX Runtime memory while OmaYap is idle. Changing speed while the worker is
+cold only saves the setting; it does not load or restart the worker. A later
+read starts a fresh worker with the saved speed.
+
 ## Use
 
 - Select text in any application and press **F10**.
@@ -149,12 +155,33 @@ the live Hyprland configuration:
 tests/run
 ```
 
+To measure cold-start latency and worker memory, use the installed runtime and
+model. The practical default matrix uses a 1,000-character input with
+200/400/800-character synthesis chunks. Input is sent through private stdin;
+the report contains only counters and fixed status/error codes:
+
+```bash
+~/.local/share/omayap-read-aloud/venv/bin/python \
+  benchmarks/memory.py --format csv --output /tmp/omayap-memory.csv
+```
+
+The report includes first-status and first-audio latency, sampled PSS,
+private-dirty and anonymous memory peaks, thread peaks, total completion
+latency, and worker exit status. Each matrix case starts a fresh worker. Pass
+`--lengths 1000,5000,20000` for the full input-size matrix, or
+`--lengths 20000 --chunk-targets 200,400,800` for a maximum-length chunk
+comparison. To compare the old Piper ONNX defaults, repeat the same command
+with the benchmark-only `--legacy-defaults` option; normal OmaYap startup
+never enables that mode. The benchmark discards PCM after synthesis, so its
+memory results do not include a `pw-play` process. It exits nonzero if any case
+fails or times out.
+
 The final validation used for a checkout is:
 
 ```bash
 tests/run
 omarchy plugin validate .
 bash -n bin/setup bin/uninstall tests/run
-python3 -m compileall -q worker share tests
+python3 -m compileall -q worker share tests benchmarks
 git diff --check
 ```
