@@ -160,46 +160,56 @@ class AudioSink:
     def write(self, data: bytes, sample_rate: int) -> None:
         if not data:
             return
+        # Only protect the process pointer while taking a snapshot.  A
+        # PipeWire stdin write can block while its audio buffer drains; if it
+        # happens under this lock, stop() cannot reach pw-play until playback
+        # finishes (which made the stop button appear to take several
+        # seconds).  Killing the detached process below unblocks the writer
+        # and causes it to fail harmlessly with BrokenPipeError/OSError.
         with self._lock:
             if self.process is None:
                 self._start(sample_rate)
             process = self.process
             if process is None or process.stdin is None:
                 raise RuntimeError("audio-player-unavailable")
-            try:
-                process.stdin.write(data)
-                process.stdin.flush()
-            except (BrokenPipeError, OSError) as exc:
-                raise RuntimeError("audio-player-failed") from exc
+            stream = process.stdin
+        try:
+            stream.write(data)
+            stream.flush()
+        except (BrokenPipeError, OSError) as exc:
+            raise RuntimeError("audio-player-failed") from exc
 
     def finish(self) -> None:
         with self._lock:
             process, self.process = self.process, None
-            if process is None:
-                return
-            try:
-                if process.stdin is not None:
-                    process.stdin.close()
-                process.wait(timeout=3)
-            except (OSError, subprocess.TimeoutExpired):
-                try:
-                    process.kill()
-                except OSError:
-                    pass
-
-    def stop(self) -> None:
-        with self._lock:
-            process, self.process = self.process, None
-            if process is None:
-                return
+        if process is None:
+            return
+        try:
+            if process.stdin is not None:
+                process.stdin.close()
+            process.wait(timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
             try:
                 process.kill()
             except OSError:
                 pass
-            try:
-                process.wait(timeout=1)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
+
+    def stop(self) -> None:
+        with self._lock:
+            process, self.process = self.process, None
+        if process is None:
+            return
+        # Do not hold _lock while killing or waiting.  The writer may be
+        # concurrently unwinding after the process was killed, and should not
+        # have to acquire the lock before stop can return.
+        try:
+            process.kill()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
 
 class Worker:
@@ -434,6 +444,10 @@ class Worker:
             if self._active(generation):
                 completed = True
         except RuntimeError as exc:
+            # A process kill intentionally interrupts an in-flight write.  Do
+            # not turn that expected cancellation into a late error state.
+            if not self._active(generation):
+                return
             code = str(exc)
             if code == "voice-model-missing":
                 self._emit("setup-required", code)
@@ -444,7 +458,8 @@ class Worker:
         except Exception:
             # Never serialize exception text: dependency errors can contain
             # command lines or user text.  The UI only needs an error code.
-            self._emit("error", "synthesis-failed")
+            if self._active(generation):
+                self._emit("error", "synthesis-failed")
         finally:
             if sink is not None:
                 with self._lock:

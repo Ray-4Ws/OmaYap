@@ -10,9 +10,11 @@ from pathlib import Path
 import subprocess
 import sys
 from typing import Any
+from unittest.mock import patch
 
+from share.bounded_capture import OVERFLOW_EXIT_CODE
 from share.capture import CommandResult, capture_selection
-from worker.worker import MAX_CHARS, Worker, clamp_speed, sentence_chunks
+from worker.worker import AudioSink, MAX_CHARS, Worker, clamp_speed, sentence_chunks
 
 
 @dataclass
@@ -44,6 +46,53 @@ class FakeSink:
 
     def finish(self) -> None:
         self.finished = True
+
+
+class AudioSinkTests(unittest.TestCase):
+    def test_stop_can_kill_player_while_write_is_blocked(self):
+        """Regression test for the stop button waiting on a PipeWire write."""
+
+        write_started = threading.Event()
+        release_write = threading.Event()
+        killed = threading.Event()
+
+        class BlockingStdin:
+            def write(self, _data: bytes) -> int:
+                write_started.set()
+                release_write.wait(2)
+                return len(_data)
+
+            def flush(self) -> None:
+                return
+
+            def close(self) -> None:
+                release_write.set()
+
+        class FakeProcess:
+            stdin = BlockingStdin()
+
+            def kill(self) -> None:
+                killed.set()
+                release_write.set()
+
+            def wait(self, timeout: float = 0) -> int:
+                return 0
+
+        process = FakeProcess()
+        sink = AudioSink(command=["fake-pw-play"])
+        with patch("worker.worker.subprocess.Popen", return_value=process):
+            writer = threading.Thread(target=sink.write, args=(b"audio", 22_050))
+            writer.start()
+            self.assertTrue(write_started.wait(1), "test writer did not block")
+
+            started = time.monotonic()
+            sink.stop()
+            elapsed = time.monotonic() - started
+
+        writer.join(1)
+        self.assertFalse(writer.is_alive(), "killed player did not unblock writer")
+        self.assertTrue(killed.is_set())
+        self.assertLess(elapsed, 0.25, "stop waited for the blocking audio write")
 
 
 def wait_for(predicate, timeout: float = 2.0) -> None:
@@ -387,6 +436,79 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(result.reason, "selection-shortcut-failed")
         self.assertTrue(result.restored)
         self.assertEqual(current["value"], "old")
+
+    def test_oversized_clipboard_backup_is_refused_before_any_write(self):
+        calls = []
+
+        def run(argv, stdin=""):
+            calls.append((argv, stdin))
+            if argv[:2] == ["wl-paste", "--primary"]:
+                return CommandResult(1, "")
+            if argv[1:2] == ["--list-types"]:
+                return CommandResult(0, "text/plain\n")
+            if argv[0] == "wl-paste":
+                return CommandResult(OVERFLOW_EXIT_CODE, "")
+            return CommandResult(1, "")
+
+        result = capture_selection(run)
+        self.assertEqual(result.reason, "clipboard-too-large")
+        self.assertFalse(result.clipboard_touched)
+        self.assertFalse(any(argv[0] in {"wl-copy", "wtype"} for argv, _ in calls))
+
+    def test_oversized_primary_selection_is_rejected_without_clipboard_fallback(self):
+        calls = []
+
+        def run(argv, stdin=""):
+            calls.append((argv, stdin))
+            if argv[:2] == ["wl-paste", "--primary"]:
+                return CommandResult(OVERFLOW_EXIT_CODE, "")
+            return CommandResult(1, "")
+
+        result = capture_selection(run)
+        self.assertEqual(result.reason, "selection-too-large")
+        self.assertFalse(result.clipboard_touched)
+        self.assertFalse(any(argv[0] in {"wl-copy", "wtype"} for argv, _ in calls))
+
+
+class BoundedCaptureTests(unittest.TestCase):
+    @staticmethod
+    def helper_path() -> Path:
+        return Path(__file__).resolve().parents[1] / "share" / "bounded_capture.py"
+
+    def run_helper(self, cap: int, producer: str, *producer_args: str) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(self.helper_path()),
+                "--cap",
+                str(cap),
+                "--",
+                sys.executable,
+                "-c",
+                producer,
+                *producer_args,
+            ],
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+
+    def test_exact_cap_bytes_pass_without_modification(self):
+        result = self.run_helper(5, "import sys; sys.stdout.buffer.write(b'abcde')")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b"abcde")
+        self.assertEqual(result.stderr, b"")
+
+    def test_cap_plus_one_returns_overflow_with_empty_stdout_and_reaps(self):
+        # The producer stays alive after writing so a wrapper that fails to
+        # kill/reap on overflow would hit the test timeout.
+        result = self.run_helper(
+            8,
+            "import sys, time; sys.stdout.buffer.write(b'x' * 9); sys.stdout.flush(); time.sleep(10)",
+        )
+        self.assertEqual(result.returncode, OVERFLOW_EXIT_CODE)
+        self.assertEqual(result.stdout, b"")
+        self.assertEqual(result.stderr, b"")
 
 
 if __name__ == "__main__":

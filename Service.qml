@@ -15,6 +15,14 @@ Item {
   readonly property string pluginVersion: "1.0.0"
   readonly property string voiceName: "en_US-lessac-medium"
   readonly property int maxCharacters: 20000
+  // The wrapper reads cap+1 bytes and emits no stdout on overflow.  This
+  // selection cap accepts 20,001 four-byte UTF-8 code points so QML can count
+  // Unicode code points (rather than UTF-16 code units) before worker IPC.
+  readonly property int selectionByteCap: 80004
+  readonly property int mimeByteCap: 4096
+  readonly property int clipboardByteCap: 1048576
+  readonly property int activeWindowByteCap: 16384
+  readonly property int boundedOverflowExitCode: 125
   readonly property string home: Quickshell.env("HOME")
   readonly property string configHome: Quickshell.env("XDG_CONFIG_HOME") || (home + "/.config")
   readonly property string dataHome: Quickshell.env("XDG_DATA_HOME") || (home + "/.local/share")
@@ -38,7 +46,12 @@ Item {
   property real speed: 1.0
   property int characterCount: 0
   property string errorCode: "runtime-missing"
-  readonly property bool active: status === "capturing" || status === "loading" || status === "speaking"
+  // Keep the control busy until the worker acknowledges stop.  The worker
+  // may still be draining/canceling a synthesis thread after the button is
+  // pressed; treating that interval as idle lets a second click start a new
+  // selection before the old one is gone.
+  property bool stopPending: false
+  readonly property bool active: status === "capturing" || status === "loading" || status === "speaking" || status === "stopping"
 
   // Capture state is intentionally transient.  No selection is written to a
   // file or included in a process command line; it is sent only through the
@@ -54,6 +67,51 @@ Item {
   property bool restoreCancelled: false
   property var pendingWorkerCommands: []
 
+  // Collector text is not acted on until its corresponding Process has also
+  // delivered onExited.  The serial and handled flags prevent a canceled
+  // process's late collector/exit signals from advancing a newer capture.
+  property string primaryTypesOutput: ""
+  property bool primaryTypesStreamFinished: false
+  property bool primaryTypesExited: false
+  property bool primaryTypesHandled: false
+  property int primaryTypesExitCode: -1
+  property int primaryTypesSerial: 0
+  property string primaryTextOutput: ""
+  property bool primaryTextStreamFinished: false
+  property bool primaryTextExited: false
+  property bool primaryTextHandled: false
+  property int primaryTextExitCode: -1
+  property int primaryTextSerial: 0
+  property string clipboardTypesOutput: ""
+  property bool clipboardTypesStreamFinished: false
+  property bool clipboardTypesExited: false
+  property bool clipboardTypesHandled: false
+  property int clipboardTypesExitCode: -1
+  property int clipboardTypesSerial: 0
+  property string clipboardTextOutput: ""
+  property bool clipboardTextStreamFinished: false
+  property bool clipboardTextExited: false
+  property bool clipboardTextHandled: false
+  property int clipboardTextExitCode: -1
+  property int clipboardTextSerial: 0
+  property string activeWindowOutput: ""
+  property bool activeWindowStreamFinished: false
+  property bool activeWindowExited: false
+  property bool activeWindowHandled: false
+  property int activeWindowExitCode: -1
+  property int activeWindowSerial: 0
+  property string pollOutput: ""
+  property bool pollStreamFinished: false
+  property bool pollExited: false
+  property bool pollHandled: false
+  property int pollExitCode: -1
+  property int pollSerial: 0
+  property string settingsOutput: ""
+  property bool settingsStreamFinished: false
+  property bool settingsExited: false
+  property bool settingsReadHandled: false
+  property int settingsExitCode: -1
+
   function clampSpeed(value) {
     var number = Number(value)
     if (!isFinite(number)) number = 1.0
@@ -68,6 +126,51 @@ Item {
 
   function setupHint() {
     notify("OmaYap setup required", "Run bin/setup in the installed plugin directory.")
+  }
+
+  function boundedCommand(cap, argv) {
+    // All commands here are fixed argv vectors.  The private selection never
+    // enters this array; it only travels through the wrapper's stdout pipe.
+    return [root.pythonPath, root.pluginRoot + "/share/bounded_capture.py", "--cap", String(cap), "--"].concat(argv)
+  }
+
+  function codePointCount(value) {
+    var text = String(value || "")
+    var count = 0
+    for (var index = 0; index < text.length; index++, count++) {
+      var high = text.charCodeAt(index)
+      if (high >= 0xD800 && high <= 0xDBFF && index + 1 < text.length) {
+        var low = text.charCodeAt(index + 1)
+        if (low >= 0xDC00 && low <= 0xDFFF) index++
+      }
+    }
+    return count
+  }
+
+  function rejectCapturedText(actual) {
+    root.pendingCapturedText = ""
+    root.captureStage = "idle"
+    root.clipboardBefore = ""
+    root.clipboardCleared = false
+    root.restoreCancelled = false
+    root.characterCount = 0
+    root.status = "idle"
+    root.errorCode = "selection-too-long"
+    root.notify("OmaYap selection too long", Number(actual).toLocaleString() + " characters selected; maximum is " + root.maxCharacters.toLocaleString() + ".")
+  }
+
+  function rejectOversizedCapture() {
+    root.pendingCapturedText = ""
+    root.captureStage = "idle"
+    root.clipboardBefore = ""
+    root.clipboardCleared = false
+    root.restoreCancelled = false
+    root.characterCount = 0
+    root.status = "idle"
+    root.errorCode = "selection-too-long"
+    // A byte-overflowing producer emitted no usable text, so its exact
+    // Unicode count is unknown.  Report only the fixed safe limit.
+    root.notify("OmaYap selection too long", "Selection exceeds the 20,000-character maximum. No text was read.")
   }
 
   function statusJson() {
@@ -89,6 +192,15 @@ Item {
       // A malformed settings file is recoverable.  Keep the default speed and
       // let the next user change rewrite it with mode 0600.
     }
+  }
+
+  function applySettingsIfSafe() {
+    if (!root.settingsExited || !root.settingsStreamFinished || root.settingsReadHandled) return
+    root.settingsReadHandled = true
+    // head -c 4097 is intentionally one byte over the accepted setting size:
+    // a 4097-byte file is observed and discarded without collecting more.
+    if (root.settingsExitCode === 0 && root.settingsOutput.length <= 4096)
+      root.applySettings(root.settingsOutput)
   }
 
   function persistSpeed() {
@@ -166,9 +278,22 @@ Item {
     if (!parsed || parsed.event !== "state") return
 
     var nextStatus = String(parsed.status || "")
-    if (["setup-required", "idle", "capturing", "loading", "speaking", "error"].indexOf(nextStatus) !== -1)
+    if (["setup-required", "idle", "capturing", "loading", "speaking", "stopping", "error"].indexOf(nextStatus) !== -1)
       root.status = nextStatus
     root.speed = root.clampSpeed(parsed.speed)
+
+    // A stop command is acknowledged by the worker's idle (or setup-required)
+    // state. Ignore stale speaking/loading/error events that were already in
+    // stdout when stop was pressed, so they cannot re-enable the read action
+    // or display a cancellation as a failure.
+    if (root.stopPending && nextStatus !== "idle" && nextStatus !== "setup-required") {
+      root.status = "stopping"
+      root.characterCount = 0
+      root.errorCode = ""
+      return
+    }
+    if (root.stopPending) root.stopPending = false
+
     root.characterCount = Math.max(0, Number(parsed.characters || 0))
     root.errorCode = String(parsed.errorCode || "")
 
@@ -192,7 +317,7 @@ Item {
     // A fallback capture may still be restoring the user's clipboard. Do not
     // start another capture until that asynchronous restore has completed; an
     // old wl-copy exit would otherwise clear the new capture's state.
-    if (root.captureStage === "restore") return
+    if (root.captureStage === "restore" || root.stopPending) return
     if (root.setupRequired) {
       root.setupHint()
       return
@@ -203,23 +328,32 @@ Item {
     root.captureStage = "primary-types"
     root.status = "capturing"
     root.errorCode = ""
-    primaryTypesProc.command = ["wl-paste", "--list-types", "--primary"]
+    root.primaryTypesSerial = root.captureSerial
+    root.primaryTypesOutput = ""
+    root.primaryTypesStreamFinished = false
+    root.primaryTypesExited = false
+    root.primaryTypesHandled = false
+    root.primaryTypesExitCode = -1
+    primaryTypesProc.command = root.boundedCommand(root.mimeByteCap, ["wl-paste", "--list-types", "--primary"])
     primaryTypesProc.running = false
     primaryTypesProc.running = true
   }
 
   function toggleSelection() {
+    if (root.stopPending) return
     if (root.active) root.stop()
     else root.readSelection()
   }
 
   function stop() {
+    if (root.stopPending) return
     root.cancelCapture(true)
     root.pendingWorkerCommands = []
-    if (workerProc.running) workerProc.write(JSON.stringify({ command: "stop" }) + "\n")
+    root.stopPending = workerProc.running
+    if (root.stopPending) workerProc.write(JSON.stringify({ command: "stop" }) + "\n")
     root.characterCount = 0
     root.errorCode = ""
-    root.status = root.setupRequired ? "setup-required" : "idle"
+    root.status = root.stopPending ? "stopping" : (root.setupRequired ? "setup-required" : "idle")
   }
 
   function submitCapturedText() {
@@ -232,6 +366,13 @@ Item {
     if (!text || !text.trim()) {
       root.status = "idle"
       root.notify("OmaYap", "No text selection was available. Select text and try again.")
+      return
+    }
+    // JavaScript strings are UTF-16.  Count surrogate pairs as one Unicode
+    // code point so the UI and worker enforce the same 20,000-character rule.
+    var actual = root.codePointCount(text)
+    if (actual > root.maxCharacters) {
+      root.rejectCapturedText(actual)
       return
     }
     root.workerCommand({ command: "read-selection", text: text })
@@ -328,7 +469,13 @@ Item {
   function beginClipboardFallback() {
     if (root.captureStage.indexOf("primary") !== 0) return
     root.captureStage = "clipboard-types"
-    clipboardTypesProc.command = ["wl-paste", "--list-types"]
+    root.clipboardTypesSerial = root.captureSerial
+    root.clipboardTypesOutput = ""
+    root.clipboardTypesStreamFinished = false
+    root.clipboardTypesExited = false
+    root.clipboardTypesHandled = false
+    root.clipboardTypesExitCode = -1
+    clipboardTypesProc.command = root.boundedCommand(root.mimeByteCap, ["wl-paste", "--list-types"])
     clipboardTypesProc.running = false
     clipboardTypesProc.running = true
   }
@@ -370,7 +517,13 @@ Item {
       return
     }
     root.pollAttempts += 1
-    pollProc.command = ["wl-paste", "--no-newline", "--type", "text/plain"]
+    root.pollSerial = root.captureSerial
+    root.pollOutput = ""
+    root.pollStreamFinished = false
+    root.pollExited = false
+    root.pollHandled = false
+    root.pollExitCode = -1
+    pollProc.command = root.boundedCommand(root.selectionByteCap, ["wl-paste", "--no-newline", "--type", "text/plain"])
     pollProc.running = false
     pollProc.running = true
   }
@@ -385,13 +538,180 @@ Item {
     pollTimer.start()
   }
 
+  function handlePrimaryTypes(exitCode, raw) {
+    if (root.captureStage !== "primary-types" || root.primaryTypesSerial !== root.captureSerial) return
+    if (Number(exitCode) !== 0) {
+      // No partial MIME list is inspected.  A failed/oversized PRIMARY list
+      // simply falls back to the separately bounded CLIPBOARD path.
+      root.beginClipboardFallback()
+      return
+    }
+    var types = String(raw || "").toLowerCase()
+    if (types.indexOf("text/plain") !== -1 || types.indexOf("utf8_string") !== -1 || types.indexOf("string") !== -1) {
+      root.captureStage = "primary-text"
+      root.primaryTextSerial = root.captureSerial
+      root.primaryTextOutput = ""
+      root.primaryTextStreamFinished = false
+      root.primaryTextExited = false
+      root.primaryTextHandled = false
+      root.primaryTextExitCode = -1
+      primaryTextProc.command = root.boundedCommand(root.selectionByteCap, ["wl-paste", "--primary", "--type", "text/plain", "--no-newline"])
+      primaryTextProc.running = false
+      primaryTextProc.running = true
+    } else {
+      root.beginClipboardFallback()
+    }
+  }
+
+  function processPrimaryTypes() {
+    if (!root.primaryTypesExited || !root.primaryTypesStreamFinished || root.primaryTypesHandled) return
+    root.primaryTypesHandled = true
+    root.handlePrimaryTypes(root.primaryTypesExitCode, root.primaryTypesOutput)
+  }
+
+  function handlePrimaryText(exitCode, raw) {
+    if (root.captureStage !== "primary-text" || root.primaryTextSerial !== root.captureSerial) return
+    if (Number(exitCode) === root.boundedOverflowExitCode) {
+      root.rejectOversizedCapture()
+      return
+    }
+    if (Number(exitCode) !== 0) {
+      root.beginClipboardFallback()
+      return
+    }
+    var value = String(raw || "")
+    if (value !== "") {
+      // PRIMARY is a separate Wayland selection.  Do not clear or rewrite
+      // CLIPBOARD when it succeeds.
+      root.pendingCapturedText = value
+      root.captureStage = "idle"
+      root.submitCapturedText()
+    } else {
+      root.beginClipboardFallback()
+    }
+  }
+
+  function processPrimaryText() {
+    if (!root.primaryTextExited || !root.primaryTextStreamFinished || root.primaryTextHandled) return
+    root.primaryTextHandled = true
+    root.handlePrimaryText(root.primaryTextExitCode, root.primaryTextOutput)
+  }
+
+  function handleClipboardTypes(exitCode, raw) {
+    if (root.captureStage !== "clipboard-types" || root.clipboardTypesSerial !== root.captureSerial) return
+    if (Number(exitCode) !== 0) {
+      root.captureStage = "idle"
+      root.status = "idle"
+      root.notify("OmaYap", "The clipboard could not be inspected safely. Copy the selection manually.")
+      return
+    }
+    var value = String(raw || "")
+    if (!root.plainClipboardTypes(value)) {
+      root.captureStage = "idle"
+      root.status = "idle"
+      root.notify("OmaYap", "The clipboard contains non-text data. Copy the text selection manually.")
+      return
+    }
+    if (value.trim() === "") {
+      root.clipboardBefore = ""
+      root.captureStage = "clear-clipboard"
+      root.clipboardCleared = true
+      clearClipboardProc.command = ["wl-copy", "--clear"]
+      clearClipboardProc.running = false
+      clearClipboardProc.running = true
+    } else {
+      root.captureStage = "clipboard-text"
+      root.clipboardTextSerial = root.captureSerial
+      root.clipboardTextOutput = ""
+      root.clipboardTextStreamFinished = false
+      root.clipboardTextExited = false
+      root.clipboardTextHandled = false
+      root.clipboardTextExitCode = -1
+      clipboardTextProc.command = root.boundedCommand(root.clipboardByteCap, ["wl-paste", "--no-newline", "--type", "text/plain"])
+      clipboardTextProc.running = false
+      clipboardTextProc.running = true
+    }
+  }
+
+  function processClipboardTypes() {
+    if (!root.clipboardTypesExited || !root.clipboardTypesStreamFinished || root.clipboardTypesHandled) return
+    root.clipboardTypesHandled = true
+    root.handleClipboardTypes(root.clipboardTypesExitCode, root.clipboardTypesOutput)
+  }
+
+  function handleClipboardText(exitCode, raw) {
+    if (root.captureStage !== "clipboard-text" || root.clipboardTextSerial !== root.captureSerial) return
+    if (Number(exitCode) !== 0) {
+      root.captureStage = "idle"
+      root.status = "idle"
+      root.notify("OmaYap", Number(exitCode) === root.boundedOverflowExitCode
+        ? "The clipboard is too large to snapshot safely. Copy the text selection manually."
+        : "The clipboard could not be read safely. Copy the selection manually.")
+      return
+    }
+    root.clipboardBefore = String(raw || "")
+    root.captureStage = "clear-clipboard"
+    root.clipboardCleared = true
+    clearClipboardProc.command = ["wl-copy", "--clear"]
+    clearClipboardProc.running = false
+    clearClipboardProc.running = true
+  }
+
+  function processClipboardText() {
+    if (!root.clipboardTextExited || !root.clipboardTextStreamFinished || root.clipboardTextHandled) return
+    root.clipboardTextHandled = true
+    root.handleClipboardText(root.clipboardTextExitCode, root.clipboardTextOutput)
+  }
+
+  function handleActiveWindow(exitCode, raw) {
+    if (root.captureStage !== "active-window" || root.activeWindowSerial !== root.captureSerial) return
+    root.captureStage = "copy"
+    wtypeProc.command = Number(exitCode) === 0 && root.terminalActive(raw)
+      ? ["wtype", "-M", "ctrl", "-k", "Insert", "-m", "ctrl"]
+      : ["wtype", "-M", "ctrl", "c", "-m", "ctrl"]
+    wtypeProc.running = false
+    wtypeProc.running = true
+  }
+
+  function processActiveWindow() {
+    if (!root.activeWindowExited || !root.activeWindowStreamFinished || root.activeWindowHandled) return
+    root.activeWindowHandled = true
+    root.handleActiveWindow(root.activeWindowExitCode, root.activeWindowOutput)
+  }
+
+  function processPolledText() {
+    if (!root.pollExited || !root.pollStreamFinished || root.pollHandled) return
+    root.pollHandled = true
+    if (root.captureStage !== "poll" || root.pollSerial !== root.captureSerial) return
+    if (Number(root.pollExitCode) === root.boundedOverflowExitCode) {
+      // The clipboard was already cleared, so restore it before reporting the
+      // bounded-capture refusal.  The helper emitted no partial text.
+      root.beginRestore("", "The selection is too large to capture safely. No text was read.")
+      return
+    }
+    if (Number(root.pollExitCode) !== 0) {
+      pollTimer.start()
+      return
+    }
+    root.handlePolledText(root.pollOutput)
+  }
+
   // ------------------------------ settings and setup/runtime probes
 
   Process {
     id: settingsReadProc
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.applySettings(text)
+      onStreamFinished: {
+        root.settingsOutput = String(text || "")
+        root.settingsStreamFinished = true
+        if (root.settingsExited && root.settingsReadHandled === false) root.applySettingsIfSafe()
+      }
+    }
+    onExited: function(exitCode) {
+      root.settingsExited = true
+      root.settingsExitCode = exitCode
+      root.applySettingsIfSafe()
     }
   }
 
@@ -421,6 +741,16 @@ Item {
       root.flushWorkerCommands()
     }
     onExited: function(exitCode) {
+      if (root.stopPending) {
+        // The worker normally stays alive for the next read, but if it exits
+        // while honoring stop, finish the UI transition without a spurious
+        // worker-exited notification.
+        root.stopPending = false
+        root.characterCount = 0
+        root.errorCode = ""
+        root.status = root.setupRequired ? "setup-required" : "idle"
+        return
+      }
       if (root.active && !root.setupRequired) {
         root.status = "error"
         root.errorCode = "worker-exited"
@@ -436,20 +766,15 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        if (root.captureStage !== "primary-types") return
-        var types = String(text || "").toLowerCase()
-        if (types.indexOf("text/plain") !== -1 || types.indexOf("utf8_string") !== -1 || types.indexOf("string") !== -1) {
-          root.captureStage = "primary-text"
-          primaryTextProc.command = ["wl-paste", "--primary", "--type", "text/plain", "--no-newline"]
-          primaryTextProc.running = false
-          primaryTextProc.running = true
-        } else {
-          root.beginClipboardFallback()
-        }
+        root.primaryTypesOutput = String(text || "")
+        root.primaryTypesStreamFinished = true
+        root.processPrimaryTypes()
       }
     }
     onExited: function(exitCode) {
-      if (root.captureStage === "primary-types" && exitCode !== 0) root.beginClipboardFallback()
+      root.primaryTypesExitCode = exitCode
+      root.primaryTypesExited = true
+      root.processPrimaryTypes()
     }
   }
 
@@ -458,20 +783,15 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        if (root.captureStage !== "primary-text") return
-        var value = String(text || "")
-        if (value !== "") {
-          // PRIMARY is a separate Wayland selection.  Do not clear or rewrite
-          // CLIPBOARD when it succeeds.
-          root.pendingCapturedText = value
-          root.captureStage = "idle"
-          root.submitCapturedText()
-        }
-        else root.beginClipboardFallback()
+        root.primaryTextOutput = String(text || "")
+        root.primaryTextStreamFinished = true
+        root.processPrimaryText()
       }
     }
     onExited: function(exitCode) {
-      if (root.captureStage === "primary-text" && exitCode !== 0) root.beginClipboardFallback()
+      root.primaryTextExitCode = exitCode
+      root.primaryTextExited = true
+      root.processPrimaryText()
     }
   }
 
@@ -482,35 +802,15 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        if (root.captureStage !== "clipboard-types") return
-        var raw = String(text || "")
-        if (!root.plainClipboardTypes(raw)) {
-          root.captureStage = "idle"
-          root.status = "idle"
-          root.notify("OmaYap", "The clipboard contains non-text data. Copy the text selection manually.")
-          return
-        }
-        if (raw.trim() === "") {
-          root.clipboardBefore = ""
-          root.captureStage = "clear-clipboard"
-          root.clipboardCleared = true
-          clearClipboardProc.command = ["wl-copy", "--clear"]
-          clearClipboardProc.running = false
-          clearClipboardProc.running = true
-        } else {
-          root.captureStage = "clipboard-text"
-          clipboardTextProc.command = ["wl-paste", "--no-newline", "--type", "text/plain"]
-          clipboardTextProc.running = false
-          clipboardTextProc.running = true
-        }
+        root.clipboardTypesOutput = String(text || "")
+        root.clipboardTypesStreamFinished = true
+        root.processClipboardTypes()
       }
     }
     onExited: function(exitCode) {
-      if (root.captureStage === "clipboard-types" && exitCode !== 0) {
-        root.captureStage = "idle"
-        root.status = "idle"
-        root.notify("OmaYap", "The clipboard could not be inspected safely. Copy the selection manually.")
-      }
+      root.clipboardTypesExitCode = exitCode
+      root.clipboardTypesExited = true
+      root.processClipboardTypes()
     }
   }
 
@@ -519,21 +819,15 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        if (root.captureStage !== "clipboard-text") return
-        root.clipboardBefore = String(text || "")
-        root.captureStage = "clear-clipboard"
-        root.clipboardCleared = true
-        clearClipboardProc.command = ["wl-copy", "--clear"]
-        clearClipboardProc.running = false
-        clearClipboardProc.running = true
+        root.clipboardTextOutput = String(text || "")
+        root.clipboardTextStreamFinished = true
+        root.processClipboardText()
       }
     }
     onExited: function(exitCode) {
-      if (root.captureStage === "clipboard-text" && exitCode !== 0) {
-        root.captureStage = "idle"
-        root.status = "idle"
-        root.notify("OmaYap", "The clipboard could not be read safely. Copy the selection manually.")
-      }
+      root.clipboardTextExitCode = exitCode
+      root.clipboardTextExited = true
+      root.processClipboardText()
     }
   }
 
@@ -547,7 +841,13 @@ Item {
       }
       root.clipboardCleared = true
       root.captureStage = "active-window"
-      activeWindowProc.command = ["hyprctl", "activewindow", "-j"]
+      root.activeWindowSerial = root.captureSerial
+      root.activeWindowOutput = ""
+      root.activeWindowStreamFinished = false
+      root.activeWindowExited = false
+      root.activeWindowHandled = false
+      root.activeWindowExitCode = -1
+      activeWindowProc.command = root.boundedCommand(root.activeWindowByteCap, ["hyprctl", "activewindow", "-j"])
       activeWindowProc.running = false
       activeWindowProc.running = true
     }
@@ -558,22 +858,15 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        if (root.captureStage !== "active-window") return
-        root.captureStage = "copy"
-        wtypeProc.command = terminalActive(text)
-          ? ["wtype", "-M", "ctrl", "-k", "Insert", "-m", "ctrl"]
-          : ["wtype", "-M", "ctrl", "c", "-m", "ctrl"]
-        wtypeProc.running = false
-        wtypeProc.running = true
+        root.activeWindowOutput = String(text || "")
+        root.activeWindowStreamFinished = true
+        root.processActiveWindow()
       }
     }
     onExited: function(exitCode) {
-      if (root.captureStage === "active-window" && exitCode !== 0) {
-        root.captureStage = "copy"
-        wtypeProc.command = ["wtype", "-M", "ctrl", "c", "-m", "ctrl"]
-        wtypeProc.running = false
-        wtypeProc.running = true
-      }
+      root.activeWindowExitCode = exitCode
+      root.activeWindowExited = true
+      root.processActiveWindow()
     }
   }
 
@@ -595,10 +888,16 @@ Item {
     id: pollProc
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.handlePolledText(text)
+      onStreamFinished: {
+        root.pollOutput = String(text || "")
+        root.pollStreamFinished = true
+        root.processPolledText()
+      }
     }
     onExited: function(exitCode) {
-      if (root.captureStage === "poll" && exitCode !== 0) pollTimer.start()
+      root.pollExitCode = exitCode
+      root.pollExited = true
+      root.processPolledText()
     }
   }
 
@@ -669,7 +968,14 @@ Item {
   }
 
   Component.onCompleted: {
-    settingsReadProc.command = ["cat", root.settingsPath]
+    root.settingsOutput = ""
+    root.settingsStreamFinished = false
+    root.settingsExited = false
+    root.settingsReadHandled = false
+    root.settingsExitCode = -1
+    // Settings are read before setupReady, so use a system utility rather
+    // than the plugin's runtime helper.  The producer itself is capped.
+    settingsReadProc.command = ["head", "-c", "4097", "--", root.settingsPath]
     settingsReadProc.running = true
     root.probeSetup()
   }
