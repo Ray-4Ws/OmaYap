@@ -37,6 +37,8 @@ grep -Fq -- 'readonly property int clipboardByteCap: 1048576' "$ROOT/Service.qml
 grep -Fq -- 'function codePointCount(value)' "$ROOT/Service.qml"
 grep -Fq -- 'if (actual > root.maxCharacters)' "$ROOT/Service.qml"
 grep -Fq -- 'var low = text.charCodeAt(index + 1)' "$ROOT/Service.qml"
+! grep -Fq -- 'root.rejectCapturedText(20001)' "$ROOT/Service.qml"
+grep -Fq -- 'Selection exceeds the 20,000-character maximum. No text was read.' "$ROOT/Service.qml"
 [[ "$(grep -Fc -- 'root.boundedCommand(root.mimeByteCap' "$ROOT/Service.qml")" -eq 2 ]]
 [[ "$(grep -Fc -- 'root.boundedCommand(root.selectionByteCap' "$ROOT/Service.qml")" -eq 2 ]]
 grep -Fq -- 'root.boundedCommand(root.clipboardByteCap' "$ROOT/Service.qml"
@@ -47,6 +49,7 @@ grep -Fq -- 'root.primaryTextExitCode = exitCode' "$ROOT/Service.qml"
 grep -Fq -- 'root.clipboardTextExitCode = exitCode' "$ROOT/Service.qml"
 grep -Fq -- 'root.pollExitCode = exitCode' "$ROOT/Service.qml"
 grep -Fq -- 'omarchy restart shell' "$ROOT/README.md"
+! grep -Fq -- 'process.wait()' "$ROOT/share/bounded_capture.py"
 
 python3 -m unittest -v tests.test_worker
 
