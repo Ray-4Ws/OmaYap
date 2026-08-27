@@ -87,9 +87,16 @@ selection manually and try again.
 
 Selected text is held only in process memory and worker stdin. It is never
 placed in command-line arguments, worker stdout, logs, settings, or
-notifications. The worker enforces a 20,000-Unicode-code-point limit; an
-oversized selection is rejected in full and the notification reports the
-actual and allowed counts. Empty/stale selections are not spoken.
+notifications. Every replaceable command that produces data for QML runs
+through the dependency-free `share/bounded_capture.py` helper: MIME metadata
+is capped at 4 KiB, selection reads at 80,004 bytes (enough to count 20,001
+four-byte UTF-8 code points), active-window metadata at 16 KiB, and the
+temporary clipboard backup at 1 MiB. The helper kills and reaps an overflowing
+producer and emits no partial stdout. The worker and QML service then enforce
+a 20,000-Unicode-code-point limit; an oversized selection is rejected in full
+and the notification reports only fixed safe count metadata. An oversized
+clipboard backup is refused before the clipboard is cleared, so it can never
+be restored truncated. Empty/stale selections are not spoken.
 
 The local voice is CPU-based and English-only in this v1. There is no cloud TTS
 endpoint, language detection, OCR, document import, pause/seek UI, or voice
@@ -103,6 +110,14 @@ stamp changes:
 ```bash
 omarchy plugin update omayap.read-aloud --yes
 ~/.config/omarchy/plugins/omayap.read-aloud/bin/setup
+```
+
+If an update succeeds but the bar still shows the previous OmaYap interface,
+restart the Omarchy shell once so its long-running QML process loads the new
+plugin files:
+
+```bash
+omarchy restart shell
 ```
 
 The runtime stamp makes an incompatible update show **setup required** until

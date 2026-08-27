@@ -31,6 +31,22 @@ grep -Fq -- 'activeFocusOnPress: true' "$ROOT/BarWidget.qml"
 grep -Fq -- 'speedValue.forceActiveFocus()' "$ROOT/BarWidget.qml"
 grep -Fq -- 'placeholderText: "1.10"' "$ROOT/BarWidget.qml"
 grep -Fq -- 'text: "Custom"' "$ROOT/BarWidget.qml"
+grep -Fq -- 'share/bounded_capture.py' "$ROOT/Service.qml"
+grep -Fq -- 'readonly property int selectionByteCap: 80004' "$ROOT/Service.qml"
+grep -Fq -- 'readonly property int clipboardByteCap: 1048576' "$ROOT/Service.qml"
+grep -Fq -- 'function codePointCount(value)' "$ROOT/Service.qml"
+grep -Fq -- 'if (actual > root.maxCharacters)' "$ROOT/Service.qml"
+grep -Fq -- 'var low = text.charCodeAt(index + 1)' "$ROOT/Service.qml"
+[[ "$(grep -Fc -- 'root.boundedCommand(root.mimeByteCap' "$ROOT/Service.qml")" -eq 2 ]]
+[[ "$(grep -Fc -- 'root.boundedCommand(root.selectionByteCap' "$ROOT/Service.qml")" -eq 2 ]]
+grep -Fq -- 'root.boundedCommand(root.clipboardByteCap' "$ROOT/Service.qml"
+grep -Fq -- 'root.boundedCommand(root.activeWindowByteCap' "$ROOT/Service.qml"
+grep -Fq -- 'settingsReadProc.command = ["head", "-c", "4097"' "$ROOT/Service.qml"
+grep -Fq -- 'onExited: function(exitCode)' "$ROOT/Service.qml"
+grep -Fq -- 'root.primaryTextExitCode = exitCode' "$ROOT/Service.qml"
+grep -Fq -- 'root.clipboardTextExitCode = exitCode' "$ROOT/Service.qml"
+grep -Fq -- 'root.pollExitCode = exitCode' "$ROOT/Service.qml"
+grep -Fq -- 'omarchy restart shell' "$ROOT/README.md"
 
 python3 -m unittest -v tests.test_worker
 
