@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Capture OCR text through Omarchy's installed native flow without touching
+# CLIPBOARD.  The native command is inspected before its wl-copy and
+# notification calls are redirected through private, checked-in shims.
+set -Eeuo pipefail
+
+EXIT_COMPATIBILITY=64
+EXIT_NATIVE_UNAVAILABLE=65
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+SHIMS="$ROOT/bin/ocr-shims"
+
+fail() {
+  # Deliberately do not print the native source, dependency diagnostics, or
+  # OCR output: the caller maps this fixed status to a local notice.
+  exit "$1"
+}
+
+native=""
+if ! native="$(command -v omarchy-capture-text 2>/dev/null)"; then
+  fail "$EXIT_NATIVE_UNAVAILABLE"
+fi
+[[ -n "$native" && -f "$native" ]] || fail "$EXIT_COMPATIBILITY"
+source=""
+if ! source="$(readlink -f -- "$native" 2>/dev/null)"; then
+  fail "$EXIT_COMPATIBILITY"
+fi
+[[ -n "$source" && -f "$source" && -r "$source" ]] || fail "$EXIT_COMPATIBILITY"
+
+# Keep this contract deliberately narrow.  If Omarchy changes the native
+# flow, do not guess at its side effects or run an unreviewed command.
+# Require the reviewed bare-command forms so a future absolute path or
+# command-prefix bypass cannot silently mutate CLIPBOARD or notify the user.
+grep -Eq -- '\|[[:space:]]*wl-copy([[:space:]]|$)' "$source" >/dev/null 2>&1 || fail "$EXIT_COMPATIBILITY"
+grep -Eq -- '(^|[[:space:];|&])omarchy-notification-send([[:space:]]|$)' "$source" >/dev/null 2>&1 || fail "$EXIT_COMPATIBILITY"
+# A valid bare call is not sufficient if the same source also contains an
+# absolute-path bypass. Reject every such occurrence before the native script
+# can run, including occurrences in conditional or unreachable branches.
+grep -Eq -- '/[^[:space:];|&()]*wl-copy([[:space:];|&()]|$)' "$source" >/dev/null 2>&1 && fail "$EXIT_COMPATIBILITY"
+grep -Eq -- '/[^[:space:];|&()]*omarchy-notification-send([[:space:];|&()]|$)' "$source" >/dev/null 2>&1 && fail "$EXIT_COMPATIBILITY"
+grep -Fq -- 'tesseract' "$source" >/dev/null 2>&1 || fail "$EXIT_COMPATIBILITY"
+
+[[ -x "$SHIMS/wl-copy" && -x "$SHIMS/omarchy-notification-send" ]] || fail "$EXIT_COMPATIBILITY"
+
+# The shim directory is the only PATH prefix introduced by this adapter.
+# Preserve all native command dependencies and inherit OMARCHY_OCR_LANGS
+# unchanged for the native tesseract invocation.
+native_path="${PATH:-}"
+PATH="$SHIMS${native_path:+:$native_path}"
+export PATH
+exec "$native" >/dev/stdout 2>/dev/null

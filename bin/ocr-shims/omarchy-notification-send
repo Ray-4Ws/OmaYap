@@ -1,0 +1,4 @@
+#!/bin/sh
+# Test/runtime shim used only by bin/capture-ocr: suppress the native copy
+# notification because this adapter does not copy anything.
+exit 0

@@ -29,7 +29,12 @@ MAX_SPEED = 2.0
 DEFAULT_SPEED = 1.0
 VOICE_NAME = "en_US-lessac-medium"
 CHUNK_TARGET = 800
+PROTOCOL_VERSION = 1
+MAX_REQUEST_ID_CHARS = 128
+CLEANUP_PROFILES = ("off", "safe", "article")
+DEFAULT_CLEANUP_PROFILE = "safe"
 _STDOUT_LOCK = threading.Lock()
+_REQUEST_ID_UNSET = object()
 
 
 def clamp_speed(value: Any, default: float = DEFAULT_SPEED) -> float:
@@ -48,6 +53,144 @@ def normalize_text(text: str) -> str:
     """Normalize line endings without changing the selected content otherwise."""
 
     return unicodedata.normalize("NFC", text.replace("\r\n", "\n").replace("\r", "\n"))
+
+
+_REMOVED_SAFE_CHARACTERS = frozenset("\u00ad\u200b\u2060\ufeff")
+_ARTICLE_NUMBER = r"\d+(?:\s*(?:[-–—]|to)\s*\d+|\s*,\s*\d+)*"
+_ARTICLE_CITATION_RE = re.compile(
+    rf"(?P<space>[ \t]*)\[(?P<body>(?:{_ARTICLE_NUMBER}|notes?\s+{_ARTICLE_NUMBER}|citation\s+needed))\]",
+    re.IGNORECASE,
+)
+_ARTICLE_OPERATOR_CHARACTERS = frozenset("=([{,:;+-*/%")
+
+
+def _safe_cleanup(text: str) -> str:
+    """Remove known speech-hostile controls while preserving linguistic marks."""
+
+    cleaned: list[str] = []
+    for character in normalize_text(text):
+        if character in _REMOVED_SAFE_CHARACTERS:
+            continue
+        if character == "\n":
+            cleaned.append("\n")
+            continue
+        if character in "\u2028\u2029":
+            cleaned.append("\n")
+            continue
+        if character == "\t":
+            cleaned.append(" ")
+            continue
+        # C0/C1 controls other than the meaningful line/tab whitespace are
+        # not useful to speech and can otherwise create odd pauses.
+        if unicodedata.category(character) == "Cc":
+            continue
+        if character.isspace():
+            cleaned.append(" ")
+            continue
+        cleaned.append(character)
+
+    value = "".join(cleaned)
+    value = re.sub(r" {2,}", " ", value)
+    value = re.sub(r" *\n *", "\n", value)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip(" \n")
+
+
+def _article_citation_is_adjacent(value: str, match: re.Match[str]) -> bool:
+    """Keep standalone arrays/math/code-like markers conservatively."""
+
+    before = match.start("space")
+    while before > 0 and value[before - 1] in " \t":
+        before -= 1
+    if before == 0:
+        return False
+    previous = value[before - 1]
+    if previous in _ARTICLE_OPERATOR_CHARACTERS:
+        # Citation lists often chain markers as ``[2], [note 1]``.  Permit
+        # that punctuation only when the previous bracketed token was itself
+        # an adjacent citation; this keeps ``values = [1, 2]`` intact.
+        if previous == "," and before > 1 and value[before - 2] == "]":
+            prior_open = value.rfind("[", 0, before - 1)
+            prior_marker = value[prior_open : before - 1] if prior_open >= 0 else ""
+            if _ARTICLE_CITATION_RE.fullmatch(prior_marker):
+                prior_before = prior_open
+                while prior_before > 0 and value[prior_before - 1] in " \t":
+                    prior_before -= 1
+                if prior_before > 0 and (
+                    value[prior_before - 1].isalnum() or value[prior_before - 1] in ".!?)]}"
+                ):
+                    return True
+        return False
+    if previous == "]":
+        # Adjacent citation chains such as ``Sentence[1][2]`` are common in
+        # copied articles.  Only continue a chain when the preceding marker
+        # is itself a recognized citation attached to prose; this does not
+        # turn array/code subscripts into citations.
+        prior_open = value.rfind("[", 0, before)
+        prior_marker = value[prior_open:before] if prior_open >= 0 else ""
+        if _ARTICLE_CITATION_RE.fullmatch(prior_marker):
+            prior_before = prior_open
+            while prior_before > 0 and value[prior_before - 1] in " \t":
+                prior_before -= 1
+            if prior_before > 0 and (
+                value[prior_before - 1].isalnum()
+                or value[prior_before - 1] in ".!?)]}"
+            ):
+                return True
+        return False
+    if previous in ".!?":
+        return True
+    if not (previous.isalnum() or previous in ")]}"):
+        return False
+
+    # A one-character no-space subscript is more likely math (x[1]) than an
+    # article citation.  Also avoid identifiers directly following an
+    # assignment/operator (arr[1] in code).
+    marker_has_space = match.start("space") < match.start("body") - 1
+    token_end = before
+    token_start = token_end
+    while token_start > 0 and (value[token_start - 1].isalnum() or value[token_start - 1] == "_"):
+        token_start -= 1
+    token = value[token_start:token_end]
+    if not marker_has_space and len(token) == 1 and token.isascii():
+        return False
+    context = token_start
+    while context > 0 and value[context - 1] in " \t":
+        context -= 1
+    if not marker_has_space and context > 0 and value[context - 1] in _ARTICLE_OPERATOR_CHARACTERS:
+        return False
+    return bool(token)
+
+
+def _article_cleanup(text: str) -> str:
+    removed_citation = False
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal removed_citation
+        if _article_citation_is_adjacent(text, match):
+            removed_citation = True
+            return ""
+        return match.group(0)
+
+    value = _ARTICLE_CITATION_RE.sub(replace, text)
+    if removed_citation:
+        # These repairs apply only when citation removal created the artifact;
+        # article mode must not rewrite repeated punctuation in ordinary text.
+        value = re.sub(r",\s*,+", ",", value)
+        value = re.sub(r" +([,.;:!?])", r"\1", value)
+    return value
+
+
+def cleanup_text(text: str, profile: str = DEFAULT_CLEANUP_PROFILE) -> str:
+    """Apply one of the stable, local reading cleanup profiles."""
+
+    if profile not in CLEANUP_PROFILES:
+        raise ValueError("invalid-cleanup-profile")
+    normalized = normalize_text(text)
+    if profile == "off":
+        return normalized
+    cleaned = _safe_cleanup(normalized)
+    return _article_cleanup(cleaned) if profile == "article" else cleaned
 
 
 def _sentence_boundary(text: str, start: int, end: int) -> int:
@@ -299,12 +442,20 @@ class Worker:
         self._voice_loaded = False
         self._lock = threading.RLock()
         self._voice_condition = threading.Condition(self._lock)
+        # ``stop`` invalidates a generation but cannot interrupt a Piper/ONNX
+        # call already in progress.  Replacement reads therefore wait here
+        # until the canceled synthesis path unwinds instead of entering the
+        # shared voice/session concurrently.  AudioSink.stop remains outside
+        # this lock so playback cancellation stays immediate.
+        self._synthesis_lock = threading.Lock()
         self._voice_loading = False
         self._generation = 0
         self._thread: Optional[threading.Thread] = None
         self._sink: Optional[AudioSink] = None
         self._text = ""
         self._characters = 0
+        self._request_id: Optional[str] = None
+        self._cleanup_profile = DEFAULT_CLEANUP_PROFILE
         self._speed = DEFAULT_SPEED
         # A service starts the worker only after its version stamp and model
         # probe pass.  Treat that process as ready from its first metadata
@@ -328,24 +479,36 @@ class Worker:
             sys.stdout.write(json.dumps(event, ensure_ascii=True, separators=(",", ":")) + "\n")
             sys.stdout.flush()
 
-    def _snapshot(self) -> dict[str, Any]:
+    def _snapshot(self, *, request_id: Any = _REQUEST_ID_UNSET) -> dict[str, Any]:
         with self._lock:
             event: dict[str, Any] = {
                 "event": "state",
+                "protocolVersion": PROTOCOL_VERSION,
                 "status": self._status,
                 "speed": round(self._speed, 3),
                 "characters": self._characters,
+                "cleanupProfile": self._cleanup_profile,
             }
+            active_request_id = self._request_id if request_id is _REQUEST_ID_UNSET else request_id
+            if active_request_id is not None:
+                event["requestId"] = active_request_id
             if self._error_code:
                 event["errorCode"] = self._error_code
             return event
 
-    def _emit(self, status: Optional[str] = None, error_code: str = "", **extra: Any) -> None:
+    def _emit(
+        self,
+        status: Optional[str] = None,
+        error_code: str = "",
+        *,
+        request_id: Any = _REQUEST_ID_UNSET,
+        **extra: Any,
+    ) -> None:
         with self._lock:
             if status is not None:
                 self._status = status
             self._error_code = error_code
-            event = self._snapshot()
+            event = self._snapshot(request_id=request_id)
         event.update({key: value for key, value in extra.items() if value is not None})
         self._emit_callback(event)
 
@@ -365,22 +528,70 @@ class Worker:
         self._emit()
         return speed
 
-    def read_selection(self, text: Any) -> None:
+    @staticmethod
+    def _valid_request_id(request_id: Any) -> bool:
+        return (
+            isinstance(request_id, str)
+            and bool(request_id)
+            and len(request_id) <= MAX_REQUEST_ID_CHARS
+        )
+
+    @classmethod
+    def _request_id_from_message(cls, message: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+        if "requestId" not in message:
+            return None, None
+        request_id = message.get("requestId")
+        if not cls._valid_request_id(request_id):
+            return None, "invalid-request-id"
+        return request_id, None
+
+    @staticmethod
+    def _supports_protocol_version(message: dict[str, Any]) -> bool:
+        if "protocolVersion" not in message:
+            return True
+        version = message.get("protocolVersion")
+        return type(version) is int and version == PROTOCOL_VERSION
+
+    def read_selection(
+        self,
+        text: Any,
+        request_id: Optional[str] = None,
+        cleanup_profile: str = DEFAULT_CLEANUP_PROFILE,
+    ) -> None:
+        if request_id is not None and not self._valid_request_id(request_id):
+            self._emit("error", "invalid-request-id", request_id=None)
+            return
+        if cleanup_profile not in CLEANUP_PROFILES:
+            self._emit("error", "invalid-cleanup-profile", request_id=None)
+            return
         if not isinstance(text, str):
+            self.stop(emit=False)
+            with self._lock:
+                self._request_id = request_id
+                self._cleanup_profile = cleanup_profile
             self._emit("error", "invalid-selection")
+            with self._lock:
+                self._request_id = None
             return
         actual = len(text)
         self.stop(emit=False)
+        with self._lock:
+            self._request_id = request_id
+            self._cleanup_profile = cleanup_profile
         if actual > MAX_CHARS:
             with self._lock:
                 self._characters = 0
             self._emit("error", "selection-too-long", actual=actual, limit=MAX_CHARS)
+            with self._lock:
+                self._request_id = None
             return
-        text = normalize_text(text)
+        text = cleanup_text(text, cleanup_profile)
         if not text.strip():
             with self._lock:
                 self._characters = 0
             self._emit("error", "empty-selection")
+            with self._lock:
+                self._request_id = None
             return
 
         with self._lock:
@@ -398,13 +609,18 @@ class Worker:
     def stop(self, *, emit: bool = True) -> None:
         with self._lock:
             self._generation += 1
+            stop_generation = self._generation
             self._text = ""
             self._characters = 0
+            request_id = self._request_id
             sink, self._sink = self._sink, None
         if sink is not None:
             sink.stop()
         if emit:
-            self._emit("idle")
+            self._emit("idle", request_id=request_id)
+        with self._lock:
+            if self._generation == stop_generation:
+                self._request_id = None
 
     def shutdown(self) -> None:
         with self._lock:
@@ -507,24 +723,31 @@ class Worker:
                 with self._lock:
                     speed = self._speed
                 config = _synthesis_config(speed)
-                try:
-                    generated: Iterable[Any] = voice.synthesize(chunk, syn_config=config)
-                except TypeError:
-                    # Small fake voices and older Piper releases may expose a
-                    # positional-only synthesis config.
-                    generated = voice.synthesize(chunk, config)
-                for audio in generated:
+                # Piper's generator performs the actual ONNX inference while
+                # it is iterated, so hold this lock across both construction
+                # and iteration.  A canceled generation can still finish its
+                # current inference, but a replacement cannot overlap it.
+                with self._synthesis_lock:
                     if not self._active(generation):
                         return
-                    data = self._audio_bytes(audio)
-                    if data:
-                        sink.write(data, self._sample_rate(audio, voice))
-                        if first_audio and self._active(generation):
-                            first_audio = False
-                            # This remains metadata-only and allows the
-                            # benchmark to distinguish Piper's first audio
-                            # from the earlier "speaking" state.
-                            self._emit("speaking", audioStarted=True)
+                    try:
+                        generated: Iterable[Any] = voice.synthesize(chunk, syn_config=config)
+                    except TypeError:
+                        # Small fake voices and older Piper releases may expose a
+                        # positional-only synthesis config.
+                        generated = voice.synthesize(chunk, config)
+                    for audio in generated:
+                        if not self._active(generation):
+                            return
+                        data = self._audio_bytes(audio)
+                        if data:
+                            sink.write(data, self._sample_rate(audio, voice))
+                            if first_audio and self._active(generation):
+                                first_audio = False
+                                # This remains metadata-only and allows the
+                                # benchmark to distinguish Piper's first audio
+                                # from the earlier "speaking" state.
+                                self._emit("speaking", audioStarted=True)
             if self._active(generation):
                 completed = True
         except RuntimeError as exc:
@@ -561,6 +784,16 @@ class Worker:
                 # Finish the PipeWire stream before advertising idle.  This
                 # keeps the bar state truthful while the final PCM drains.
                 self._emit("idle")
+                # Keep the request ID on the terminal event for correlation,
+                # then clear it so later unscoped status/speed events do not
+                # inherit a completed request's identifier.
+                with self._lock:
+                    if generation == self._generation:
+                        self._request_id = None
+            elif not completed:
+                with self._lock:
+                    if generation == self._generation:
+                        self._request_id = None
 
     # ---------------------------------------------------------- stdin loop
 
@@ -570,9 +803,24 @@ class Worker:
         if not isinstance(message, dict):
             self._emit("error", "invalid-command")
             return True
+        if not self._supports_protocol_version(message):
+            self._emit("error", "unsupported-protocol-version", request_id=None)
+            return True
+        request_id, request_error = self._request_id_from_message(message)
+        if request_error:
+            self._emit("error", request_error, request_id=None)
+            return True
         command = message.get("command")
-        if command == "read-selection":
-            self.read_selection(message.get("text"))
+        if command in {"speak", "read-selection"}:
+            cleanup_profile = message.get("cleanupProfile", DEFAULT_CLEANUP_PROFILE)
+            if cleanup_profile not in CLEANUP_PROFILES:
+                self._emit("error", "invalid-cleanup-profile", request_id=None)
+                return True
+            self.read_selection(
+                message.get("text"),
+                request_id=request_id,
+                cleanup_profile=cleanup_profile,
+            )
         elif command == "stop":
             self.stop()
         elif command == "set-speed":

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Install the instruction-only OmaYap Codex skill without running it.
+set -Eeuo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+SOURCE="$ROOT/extras/codex-skill/omayap-yaps"
+TARGET_ROOT="$HOME/.agents/skills"
+TARGET="$TARGET_ROOT/omayap-yaps"
+
+die() {
+  echo "OmaYap skill install: $*" >&2
+  exit 1
+}
+
+[[ -n "${HOME:-}" ]] || die "HOME is not set"
+[[ -d "$SOURCE" && ! -L "$SOURCE" ]] || die "skill source is unavailable"
+[[ -f "$SOURCE/SKILL.md" && ! -L "$SOURCE/SKILL.md" ]] || die "skill source is unsafe"
+
+for parent in "$HOME/.agents" "$TARGET_ROOT"; do
+  [[ ! -L "$parent" ]] || die "refusing symlink path"
+  if [[ ! -e "$parent" ]]; then
+    mkdir -p -- "$parent"
+    chmod 700 -- "$parent"
+  elif [[ ! -d "$parent" ]]; then
+    die "skill parent is not a directory"
+  fi
+done
+
+if [[ -e "$TARGET" || -L "$TARGET" ]]; then
+  [[ -d "$TARGET" && ! -L "$TARGET" ]] || die "refusing unsafe skill target"
+else
+  mkdir -- "$TARGET"
+  chmod 700 -- "$TARGET"
+fi
+[[ ! -L "$TARGET/SKILL.md" ]] || die "refusing symlink skill file"
+
+tmp="$(mktemp "$TARGET/.SKILL.md.tmp.XXXXXX")" || die "could not stage skill"
+[[ ! -L "$tmp" ]] || die "refusing unsafe temporary path"
+trap 'rm -f -- "$tmp"' EXIT
+cp -- "$SOURCE/SKILL.md" "$tmp" || die "could not stage skill"
+chmod 600 -- "$tmp"
+mv -f -- "$tmp" "$TARGET/SKILL.md"
+trap - EXIT
+echo "OmaYap skill installed"

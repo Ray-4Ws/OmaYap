@@ -17,19 +17,26 @@ from unittest.mock import patch
 from share.bounded_capture import OVERFLOW_EXIT_CODE
 from share.capture import CommandResult, capture_selection
 from benchmarks.memory import (
+    RepeatBenchmarkResult,
     benchmark_text,
     parse_smaps_rollup,
     parse_status_threads,
     render,
+    render_repeat,
     run_case,
+    run_repeat_case,
 )
 from worker.worker import (
     AudioSink,
     DiscardAudioSink,
     MAX_CHARS,
+    CLEANUP_PROFILES,
+    DEFAULT_CLEANUP_PROFILE,
+    PROTOCOL_VERSION,
     Worker,
     _load_piper_voice,
     clamp_speed,
+    cleanup_text,
     sentence_chunks,
 )
 
@@ -139,6 +146,68 @@ class WorkerTests(unittest.TestCase):
         )
         return worker, voice, sink, events
 
+    def test_cleanup_profiles_preserve_language_marks_and_remove_target_controls(self):
+        raw = "A\u00a0\u2007  B\u2028C\x01D\x85E\u00adF\u200bG\u2060H\ufeffI\u200c\u200d\u202e\ufe0f"
+        self.assertEqual(
+            cleanup_text(raw, "safe"),
+            "A B\nCDEFGHI\u200c\u200d\u202e\ufe0f",
+        )
+        self.assertEqual(cleanup_text("A\u00a0B\u00adC\r\nD", "off"), "A\u00a0B\u00adC\nD")
+        self.assertEqual(DEFAULT_CLEANUP_PROFILE, "safe")
+        self.assertEqual(CLEANUP_PROFILES, ("off", "safe", "article"))
+
+    def test_article_cleanup_removes_adjacent_citations_but_keeps_code_and_arrays(self):
+        article = "Sentence[1] continues [2–4], [note 1], and [citation needed]."
+        self.assertEqual(cleanup_text(article, "article"), "Sentence continues, and.")
+
+        false_positives = "values = [1, 2, 3]; x[1] = 2; Code: foo[1]; [1]"
+        self.assertEqual(cleanup_text(false_positives, "article"), false_positives)
+        self.assertEqual(cleanup_text("A [1] B", "article"), "A B")
+        self.assertEqual(cleanup_text("Sentence[1][2] continues", "article"), "Sentence continues")
+        self.assertEqual(cleanup_text("Hello,, world", "article"), "Hello,, world")
+
+    def test_cleanup_limit_is_applied_before_cleanup(self):
+        worker, voice, _sink, events = self.make_worker()
+        worker.read_selection("\u00ad" * (MAX_CHARS + 1), cleanup_profile="article")
+        wait_for(lambda: any(e.get("errorCode") == "selection-too-long" for e in events))
+        self.assertEqual(events[-1]["actual"], MAX_CHARS + 1)
+        self.assertFalse(voice.calls)
+
+    def test_cleanup_profile_is_validated_and_returned_as_metadata(self):
+        secret = "cleanup profile selection stays private"
+        worker, voice, _sink, events = self.make_worker()
+        worker.handle(
+            {
+                "protocolVersion": PROTOCOL_VERSION,
+                "command": "speak",
+                "text": secret,
+                "cleanupProfile": "article",
+                "requestId": "cleanup-1",
+            }
+        )
+        wait_for(
+            lambda: any(
+                e.get("status") == "idle" and e.get("requestId") == "cleanup-1" for e in events
+            )
+        )
+        self.assertTrue(all(e.get("cleanupProfile") == "article" for e in events))
+        self.assertNotIn(secret, repr(events))
+        self.assertEqual(voice.calls[0][0], secret)
+
+        events.clear()
+        voice.calls.clear()
+        worker.handle(
+            {
+                "protocolVersion": PROTOCOL_VERSION,
+                "command": "speak",
+                "text": secret,
+                "cleanupProfile": "unsafe",
+            }
+        )
+        self.assertEqual(events[-1]["errorCode"], "invalid-cleanup-profile")
+        self.assertNotIn(secret, repr(events))
+        self.assertFalse(voice.calls)
+
     def test_speed_clamped_and_inverse_length_scale(self):
         self.assertEqual(clamp_speed("bad"), 1.0)
         self.assertEqual(clamp_speed(0.1), 0.5)
@@ -202,6 +271,81 @@ class WorkerTests(unittest.TestCase):
         rendered = repr(events)
         self.assertNotIn(secret, rendered)
         self.assertNotIn("text", " ".join(events[-1].keys()))
+
+    def test_v1_speak_and_legacy_alias_preserve_request_metadata(self):
+        secret = "request metadata must not expose selection text"
+        worker, _voice, _sink, events = self.make_worker()
+        self.assertTrue(
+            worker.handle(
+                {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "command": "speak",
+                    "text": secret,
+                    "requestId": "selection-1",
+                }
+            )
+        )
+        wait_for(
+            lambda: any(
+                e.get("status") == "idle" and e.get("requestId") == "selection-1" for e in events
+            )
+        )
+        self.assertTrue(all(e.get("protocolVersion") == PROTOCOL_VERSION for e in events))
+        self.assertTrue(
+            any(e.get("status") in {"loading", "speaking"} and e.get("requestId") == "selection-1" for e in events)
+        )
+        self.assertNotIn(secret, repr(events))
+        wait_for(lambda: "requestId" not in worker.status())
+        self.assertNotIn("requestId", worker.status())
+
+        events.clear()
+        worker.handle({"command": "read-selection", "text": "legacy alias"})
+        wait_for(lambda: any(e.get("status") == "idle" and e.get("characters") == 0 for e in events))
+        self.assertTrue(all(e.get("protocolVersion") == PROTOCOL_VERSION for e in events))
+        self.assertTrue(any(e.get("status") == "loading" for e in events))
+
+    def test_protocol_rejects_explicit_version_and_request_id_errors_without_text(self):
+        secret = "this text must stay private"
+        worker, _voice, _sink, events = self.make_worker()
+
+        worker.handle(
+            {
+                "protocolVersion": PROTOCOL_VERSION + 1,
+                "command": "speak",
+                "text": secret,
+                "requestId": "future-request",
+            }
+        )
+        version_error = events[-1]
+        self.assertEqual(version_error["protocolVersion"], PROTOCOL_VERSION)
+        self.assertEqual(version_error["status"], "error")
+        self.assertEqual(version_error["errorCode"], "unsupported-protocol-version")
+        self.assertNotIn("requestId", version_error)
+        self.assertNotIn(secret, repr(events))
+
+        for invalid_request_id in (None, 7, {}, [], ""):
+            events.clear()
+            worker.handle(
+                {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "command": "speak",
+                    "text": secret,
+                    "requestId": invalid_request_id,
+                }
+            )
+            self.assertEqual(events[-1]["protocolVersion"], PROTOCOL_VERSION)
+            self.assertEqual(events[-1]["errorCode"], "invalid-request-id")
+            self.assertNotIn("requestId", events[-1])
+            self.assertNotIn(secret, repr(events))
+
+    def test_protocol_status_and_speed_events_are_v1_metadata_only(self):
+        worker, _voice, _sink, events = self.make_worker()
+        worker.handle({"protocolVersion": PROTOCOL_VERSION, "command": "status"})
+        worker.handle({"protocolVersion": PROTOCOL_VERSION, "command": "set-speed", "speed": 1.25})
+        self.assertTrue(events)
+        self.assertTrue(all(event.get("protocolVersion") == PROTOCOL_VERSION for event in events))
+        self.assertEqual(events[-1]["speed"], 1.25)
+        self.assertTrue(all("text" not in event for event in events))
 
     def test_voice_loaded_once_and_can_retry_after_failure(self):
         calls = 0
@@ -268,6 +412,68 @@ class WorkerTests(unittest.TestCase):
         wait_for(lambda: len(sinks) == 2 and sinks[1].finished)
         self.assertTrue(any(e.get("status") == "idle" and e.get("characters") == 0 for e in events))
         self.assertEqual(maximum_concurrent_writes, 1)
+
+    def test_stop_retrigger_serializes_shared_voice_synthesis(self):
+        first_started = threading.Event()
+        release_first = threading.Event()
+        replacement_started = threading.Event()
+        active_synthesis = 0
+        maximum_concurrent_synthesis = 0
+        calls = 0
+        counter_lock = threading.Lock()
+
+        class BlockingVoice:
+            def synthesize(self, _text: str, syn_config: Any = None):
+                del syn_config
+                nonlocal active_synthesis, maximum_concurrent_synthesis, calls
+                with counter_lock:
+                    calls += 1
+                    call_number = calls
+                    active_synthesis += 1
+                    maximum_concurrent_synthesis = max(
+                        maximum_concurrent_synthesis,
+                        active_synthesis,
+                    )
+                try:
+                    if call_number == 1:
+                        first_started.set()
+                        release_first.wait(2)
+                    else:
+                        replacement_started.set()
+                    yield FakeAudio()
+                finally:
+                    with counter_lock:
+                        active_synthesis -= 1
+
+        events: list[dict[str, Any]] = []
+        worker = Worker(
+            voice_loader=BlockingVoice,
+            player_factory=FakeSink,
+            emitter=events.append,
+        )
+        worker.read_selection("first selection")
+        wait_for(first_started.is_set)
+        worker.stop()
+        worker.read_selection("replacement selection")
+
+        time.sleep(0.05)
+        self.assertFalse(replacement_started.is_set())
+        with counter_lock:
+            self.assertEqual(maximum_concurrent_synthesis, 1)
+            self.assertEqual(active_synthesis, 1)
+
+        release_first.set()
+        wait_for(replacement_started.is_set)
+        wait_for(
+            lambda: sum(
+                e.get("status") == "idle" and e.get("characters") == 0 for e in events
+            )
+            >= 2
+        )
+        with counter_lock:
+            self.assertEqual(maximum_concurrent_synthesis, 1)
+            self.assertEqual(calls, 2)
+            self.assertEqual(active_synthesis, 0)
 
     def test_stop_during_voice_load_allows_new_read_after_one_load(self):
         load_started = threading.Event()
@@ -436,6 +642,88 @@ class BenchmarkTests(unittest.TestCase):
         rendered = render([result], "json")
         self.assertNotIn("benchmark sentence", rendered)
         self.assertNotIn("text", rendered)
+
+    @staticmethod
+    def _write_repeat_worker(directory: str) -> Path:
+        source = (
+            "import json, sys, time\n"
+            "for line in sys.stdin:\n"
+            "    message = json.loads(line)\n"
+            "    command = message.get('command')\n"
+            "    if command == 'read-selection':\n"
+            "        characters = len(message.get('text', ''))\n"
+            "        print(json.dumps({'event':'state','status':'loading','characters':characters}), flush=True)\n"
+            "        print(json.dumps({'event':'state','status':'speaking','characters':characters,'audioStarted':True}), flush=True)\n"
+            "        time.sleep(0.02)\n"
+            "        print(json.dumps({'event':'state','status':'idle','characters':0}), flush=True)\n"
+            "    elif command == 'stop':\n"
+            "        print(json.dumps({'event':'state','status':'idle','characters':0}), flush=True)\n"
+            "    elif command == 'shutdown':\n"
+            "        break\n"
+        )
+        worker = Path(directory) / "repeat-worker.py"
+        worker.write_text(source, encoding="utf-8")
+        return worker
+
+    def test_repeat_serial_cycles_report_settled_memory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            worker = self._write_repeat_worker(directory)
+            result = run_repeat_case(
+                python=Path(sys.executable),
+                worker=worker,
+                model=Path(directory) / "unused.onnx",
+                config=Path(directory) / "unused.json",
+                length=200,
+                chunk_target=200,
+                repetition=1,
+                mode="serial",
+                cycles=3,
+                legacy_defaults=False,
+                timeout=2,
+                sample_interval=0.005,
+                settle_time=0.01,
+            )
+        self.assertIsInstance(result, RepeatBenchmarkResult)
+        self.assertTrue(result.completed)
+        self.assertEqual(len(result.cycles), 3)
+        for cycle in result.cycles:
+            self.assertTrue(cycle.completed)
+            self.assertEqual(cycle.completion_event, "read-idle")
+            self.assertEqual(cycle.stop_idle_events, 0)
+            self.assertEqual(cycle.replacement_idle_events, 0)
+            self.assertGreaterEqual(cycle.metric_samples, 1)
+            self.assertIsNotNone(cycle.settled_pss_kb)
+
+    def test_repeat_interrupt_cycles_separate_stop_and_replacement_idle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            worker = self._write_repeat_worker(directory)
+            result = run_repeat_case(
+                python=Path(sys.executable),
+                worker=worker,
+                model=Path(directory) / "unused.onnx",
+                config=Path(directory) / "unused.json",
+                length=200,
+                chunk_target=200,
+                repetition=1,
+                mode="interrupt",
+                cycles=3,
+                legacy_defaults=False,
+                timeout=2,
+                sample_interval=0.005,
+                settle_time=0.01,
+            )
+        self.assertTrue(result.completed)
+        for cycle in result.cycles:
+            self.assertTrue(cycle.stop_sent)
+            self.assertGreaterEqual(cycle.stop_idle_events, 1)
+            self.assertEqual(cycle.replacement_idle_events, 1)
+            self.assertEqual(cycle.completion_event, "replacement-idle")
+            self.assertIsNotNone(cycle.replacement_status_ms)
+
+        rendered = render_repeat([result], "json")
+        self.assertEqual(json.loads(rendered)["schema"], 2)
+        self.assertNotIn("benchmark sentence", rendered)
+        self.assertNotIn('"text"', rendered)
 
 
 class WorkerProtocolTests(unittest.TestCase):

@@ -10,11 +10,16 @@ BarWidget {
   readonly property string pluginId: "omayap.read-aloud"
   readonly property var readAloud: bar && bar.shell ? bar.shell.serviceFor(root.pluginId) : null
   readonly property string state: readAloud ? String(readAloud.status || "idle") : "setup-required"
+  readonly property bool ocrBusy: readAloud ? Boolean(readAloud.ocrBusy) : false
   readonly property bool active: state === "capturing" || state === "loading" || state === "speaking" || state === "stopping"
+    || (readAloud && (Boolean(readAloud.ocrBusy) || Boolean(readAloud.bridgeBusy)
+      || Boolean(readAloud.ocrCancelPending) || Boolean(readAloud.bridgeCancelPending)))
   readonly property string voiceName: readAloud ? String(readAloud.voiceName || "en_US-lessac-medium") : "en_US-lessac-medium"
   readonly property real speed: readAloud ? Number(readAloud.speed || 1.0) : 1.0
+  readonly property string cleanupProfile: readAloud ? String(readAloud.cleanupProfile || "safe") : "safe"
   readonly property int characterCount: readAloud ? Number(readAloud.characterCount || 0) : 0
   readonly property var speedPresets: [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+  readonly property var cleanupProfiles: ["off", "safe", "article"]
   property bool popupOpen: false
 
   readonly property string iconText: {
@@ -28,7 +33,7 @@ BarWidget {
 
   readonly property string statusLabel: {
     if (state === "setup-required") return "Setup required"
-    if (state === "capturing") return "Capturing selection"
+    if (state === "capturing") return root.ocrBusy ? "Capturing screen text" : "Capturing selection"
     if (state === "loading") return "Loading voice"
     if (state === "speaking") return "Speaking"
     if (state === "stopping") return "Stopping"
@@ -84,6 +89,28 @@ BarWidget {
     if (root.readAloud && typed !== root.speed) root.readAloud.setSpeed(typed)
     speedSlider.liveValue = typed
     speedValue.text = root.formatSpeed(typed)
+  }
+
+  function cleanupProfileLabel(value) {
+    if (value === "off") return "Off"
+    if (value === "article") return "Article"
+    return "Safe"
+  }
+
+  function cleanupProfileDescription(value) {
+    if (value === "off") return "Line endings and Unicode normalization only."
+    if (value === "article") return "Safe cleanup plus conservative citation markers."
+    return "Cleans spacing and controls while preserving language marks."
+  }
+
+  function setCleanupProfile(value) {
+    if (root.readAloud && root.readAloud.setCleanupProfile)
+      root.readAloud.setCleanupProfile(value)
+  }
+
+  function readOcr() {
+    if (root.readAloud && root.readAloud.readOcr)
+      root.readAloud.readOcr()
   }
 
   function presetSelected(value) {
@@ -307,6 +334,65 @@ BarWidget {
         }
       }
 
+      Column {
+        id: cleanupControls
+        width: parent.width
+        spacing: Style.space(6)
+
+        Text {
+          text: "Reading cleanup"
+          color: root.bar ? root.bar.foreground : Color.foreground
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          font.pixelSize: Style.font.bodySmall
+        }
+
+        Row {
+          width: parent.width
+          height: Style.spacing.controlHeight
+          spacing: Style.space(4)
+
+          Repeater {
+            model: root.cleanupProfiles
+            delegate: Button {
+              required property string modelData
+              width: (cleanupControls.width - Style.space(8)) / root.cleanupProfiles.length
+              height: Style.spacing.controlHeight
+              text: root.cleanupProfileLabel(modelData)
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontSize: Style.font.caption
+              foreground: root.cleanupProfile === modelData
+                ? (root.bar ? root.bar.barForeground : Color.accent)
+                : (root.bar ? root.bar.foreground : Color.foreground)
+              accent: root.bar ? root.bar.barForeground : Color.accent
+              selected: root.cleanupProfile === modelData
+              tooltipText: root.cleanupProfileDescription(modelData)
+              onClicked: root.setCleanupProfile(modelData)
+            }
+          }
+        }
+
+        Text {
+          text: root.cleanupProfileDescription(root.cleanupProfile)
+          color: Color.muted
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          font.pixelSize: Style.font.caption
+          width: parent.width
+          wrapMode: Text.WordWrap
+        }
+      }
+
+      Button {
+        width: parent.width
+        text: "Read text from screen (OCR)"
+        foreground: root.bar ? root.bar.foreground : Color.foreground
+        accent: root.bar ? root.bar.barForeground : Color.accent
+        fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+        fontSize: Style.font.bodySmall
+        enabled: !root.active
+        tooltipText: "Select a screen region and read its text aloud without changing the clipboard."
+        onClicked: root.readOcr()
+      }
+
       Text {
         text: root.characterCount > 0
           ? root.characterCount.toLocaleString() + " characters in current selection"
@@ -320,7 +406,7 @@ BarWidget {
 
       Text {
         visible: root.state === "setup-required"
-        text: "Run bin/setup after installing the plugin. Setup downloads the local voice model and checks the F10 binding."
+        text: "Run bin/setup after installing the plugin. Setup downloads the local voice model and checks both F10 and Ctrl+F10 bindings."
         color: Color.muted
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
         font.pixelSize: Style.font.caption
