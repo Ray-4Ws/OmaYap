@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the local Piper runtime/model and add the managed F10 binding.
+# Install the local Piper runtime/model and add the managed F10/CTRL+F10 bindings.
 #
 # Omarchy plugin installation intentionally does not run hooks.  This command
 # is therefore explicit and idempotent.  The OMAYAP_TEST_MODE branch is only
@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-PLUGIN_VERSION="1.1.0"
+PLUGIN_VERSION="1.3.0"
 VOICE="en_US-lessac-medium"
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -22,8 +22,10 @@ LOCKFILE="$ROOT/share/requirements.lock"
 BINDINGS="$CONFIG_HOME/hypr/bindings.lua"
 BEGIN_MARKER="-- BEGIN OMAYAP_READ_ALOUD_F10"
 END_MARKER="-- END OMAYAP_READ_ALOUD_F10"
-OWN_COMMAND="omarchy-shell omayap.read-aloud toggleSelection"
-OWN_DESCRIPTION="Read selected text aloud"
+OWN_F10_COMMAND="omarchy-shell omayap.read-aloud toggleSelection"
+OWN_F10_DESCRIPTION="Read selected text aloud"
+OWN_OCR_COMMAND="omarchy-shell omayap.read-aloud readOcr"
+OWN_OCR_DESCRIPTION="Read screen text aloud (OCR)"
 
 MODEL_URL="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/$VOICE.onnx"
 MODEL_JSON_URL="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/$VOICE.onnx.json"
@@ -49,38 +51,81 @@ ensure_private_dir() {
   chmod 700 -- "$path"
 }
 
-is_our_binding_line() {
-  grep -Eq 'OMAYAP_READ_ALOUD_F10|omarchy-shell[[:space:]]+omayap\.read-aloud[[:space:]]+toggleSelection' <<<"$1"
-}
-
-contains_foreign_f10() {
-  local source="$1" allow_ours="${2:-0}" allow_description="${3:-0}"
+contains_foreign_text_chord() {
+  local source="$1" chord="$2" allow_ours="${3:-0}" allow_description="${4:-0}" line="" rc=0
   [[ -z "$source" ]] && return 1
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    [[ "$line" =~ ^[[:space:]]*-- ]] && continue
-    if grep -Eiq '(^|[^[:alnum:]])F10([^[:alnum:]]|$)' <<<"$line" \
-      && ! { [[ "$allow_ours" == 1 ]] && is_our_binding_line "$line"; } \
-      && ! { [[ "$allow_description" == 1 ]] && grep -Fqi "$OWN_DESCRIPTION" <<<"$line"; }; then
-      echo "$line"
-      return 0
-    fi
-  done <<<"$source"
-  return 1
+  command -v python3 >/dev/null 2>&1 \
+    || die "python3 is required to safely inspect keybinding output"
+
+  # Effective-menu output and Lua are line-oriented but may spell modifiers
+  # with different spacing. Classify the complete chord so CTRL+F10 cannot be
+  # mistaken for plain F10 (and reject other modifiers as neither chord).
+  if line="$(python3 -c '
+import re
+import sys
+
+chord = sys.argv[1]
+allow_ours = sys.argv[2] == "1"
+allow_description = sys.argv[3] == "1"
+own_f10_command, own_f10_description = sys.argv[4:6]
+own_ocr_command, own_ocr_description = sys.argv[6:8]
+ctrl = re.compile(r"(?<![A-Za-z0-9])CTRL\s*(?:\+\s*|\s+)F10(?![A-Za-z0-9])", re.I)
+f10 = re.compile(r"(?<![A-Za-z0-9+])F10(?![A-Za-z0-9])", re.I)
+modifier_prefix = re.compile(r"(?:(?:CTRL|SUPER|ALT|SHIFT|META)\s*(?:\+\s*|\s+))*$", re.I)
+modifier_word = re.compile(r"CTRL|SUPER|ALT|SHIFT|META", re.I)
+
+def matches(line):
+    ctrl_match = ctrl.search(line)
+    if ctrl_match:
+        prefix = line[:ctrl_match.start()]
+        modifier_match = modifier_prefix.search(prefix)
+        modifiers = {item.upper() for item in modifier_word.findall(modifier_match.group(0))} if modifier_match else set()
+        if chord == "ctrl-f10" and modifiers == {"CTRL"}:
+            return True
+    for match in f10.finditer(line):
+        prefix = line[:match.start()]
+        modifier_match = modifier_prefix.search(prefix)
+        modifiers = {item.upper() for item in modifier_word.findall(modifier_match.group(0))} if modifier_match else set()
+        if (chord == "ctrl-f10" and modifiers == {"CTRL"}) or (chord == "f10" and not modifiers):
+            return True
+    return False
+
+seen = False
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    if not line.strip() or re.match(r"^\s*--", line):
+        continue
+    if not matches(line):
+        continue
+    if chord == "f10":
+        own_command, own_description = own_f10_command, own_f10_description
+    else:
+        own_command, own_description = own_ocr_command, own_ocr_description
+    own = (allow_ours and own_command in line) or (allow_description and own_description in line)
+    if own and not seen:
+        seen = True
+        continue
+    print(line)
+    raise SystemExit(0)
+raise SystemExit(1)
+' "$chord" "$allow_ours" "$allow_description" "$OWN_F10_COMMAND" "$OWN_F10_DESCRIPTION" "$OWN_OCR_COMMAND" "$OWN_OCR_DESCRIPTION" <<<"$source")"; then
+    printf '%s\n' "$line"
+    return 0
+  else
+    rc=$?
+    ((rc == 1)) && return 1
+    die "could not inspect keybinding output safely"
+  fi
 }
 
-contains_foreign_json_f10() {
-  local source="$1" allow_opaque="${2:-0}" line="" rc=0
+contains_foreign_json_chord() {
+  local source="$1" chord="$2" allow_ours="${3:-0}" allow_opaque="${4:-0}" line="" rc=0
   [[ -z "${source//[[:space:]]/}" ]] && return 1
   command -v python3 >/dev/null 2>&1 \
     || die "python3 is required to safely inspect hyprctl binds -j output"
 
-  # hyprctl emits one JSON array, but shell line matching is unsafe here: a
-  # single line can contain both our binding and a foreign F10 binding. Parse
-  # each object independently and permit only the exact command. Current
-  # Omarchy's Lua dispatcher hides the command behind a numeric __lua arg; on
-  # a rerun, its one exact managed description is accepted as an opaque own
-  # record, while any additional F10 record remains a conflict.
+  # hyprctl emits one JSON array. Parse every object independently and match
+  # exact modmask/key pairs: 0 is F10 and 4 is CTRL+F10.
   if line="$(python3 -c '
 import json
 import re
@@ -89,44 +134,53 @@ import sys
 try:
     bindings = json.loads(sys.stdin.read())
 except Exception:
-    print("invalid-json", file=sys.stderr)
     raise SystemExit(2)
-
 if not isinstance(bindings, list):
-    print("unexpected-json-shape", file=sys.stderr)
     raise SystemExit(2)
 
-allow_opaque = sys.argv[1] == "1"
-own_command = sys.argv[2]
-own_description = sys.argv[3]
-f10 = re.compile(r"(^|[^A-Za-z0-9])F10([^A-Za-z0-9]|$)", re.IGNORECASE)
+chord = sys.argv[1]
+allow_ours = sys.argv[2] == "1"
+allow_opaque = sys.argv[3] == "1"
+own_f10_command, own_f10_description = sys.argv[4:6]
+own_ocr_command, own_ocr_description = sys.argv[6:8]
 opaque_arg = re.compile(r"^[0-9]+$")
-managed_seen = False
+seen = False
+
+def modmask(binding):
+    value = binding.get("modmask", 0)
+    if type(value) is int:
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
 
 for binding in bindings:
-    if not isinstance(binding, dict) or not f10.search(str(binding.get("key", ""))):
+    if not isinstance(binding, dict) or str(binding.get("key", "")).upper() != "F10":
         continue
-    argument = binding.get("arg", "")
-    exact_command = (
-        allow_opaque
-        and isinstance(argument, str)
-        and argument == own_command
+    expected = 4 if chord == "ctrl-f10" else 0
+    if modmask(binding) != expected:
+        continue
+    own_command, own_description = (
+        (own_ocr_command, own_ocr_description)
+        if chord == "ctrl-f10"
+        else (own_f10_command, own_f10_description)
     )
-    opaque_own = (
+    argument = binding.get("arg", "")
+    exact = allow_ours and isinstance(argument, str) and argument == own_command
+    opaque = (
         allow_opaque
         and binding.get("dispatcher") == "__lua"
         and binding.get("description") == own_description
         and isinstance(argument, str)
         and opaque_arg.fullmatch(argument) is not None
     )
-    if (exact_command or opaque_own) and not managed_seen:
-        managed_seen = True
+    if (exact or opaque) and not seen:
+        seen = True
         continue
     print(json.dumps(binding, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
     raise SystemExit(0)
-
 raise SystemExit(1)
-' "$allow_opaque" "$OWN_COMMAND" "$OWN_DESCRIPTION" <<<"$source")"; then
+' "$chord" "$allow_ours" "$allow_opaque" "$OWN_F10_COMMAND" "$OWN_F10_DESCRIPTION" "$OWN_OCR_COMMAND" "$OWN_OCR_DESCRIPTION" <<<"$source")"; then
     printf '%s\n' "$line"
     return 0
   else
@@ -137,14 +191,19 @@ raise SystemExit(1)
 }
 
 managed_binding_present() {
+  local chord="$1"
   [[ -f "$BINDINGS" && ! -L "$BINDINGS" ]] || return 1
   grep -Fqx -- "$BEGIN_MARKER" "$BINDINGS" \
     && grep -Fqx -- "$END_MARKER" "$BINDINGS" \
-    && grep -Fq -- 'omayap.read-aloud toggleSelection' "$BINDINGS"
+    && case "$chord" in
+      f10) grep -Fq -- "$OWN_F10_COMMAND" "$BINDINGS" ;;
+      ctrl-f10) grep -Fq -- "$OWN_OCR_COMMAND" "$BINDINGS" ;;
+      *) return 1 ;;
+    esac
 }
 
-check_f10_conflict() {
-  local menu_effective="" hypr_effective="" user="" line="" allow_effective_description=0
+check_binding_conflict() {
+  local chord="$1" menu_effective="" hypr_effective="" user="" line="" allow_ours=0 allow_effective_description=0
   if command -v omarchy >/dev/null 2>&1; then
     menu_effective="$(omarchy menu keybindings --print 2>/dev/null || true)"
   fi
@@ -158,16 +217,24 @@ check_f10_conflict() {
   # command and retain only our human description.  Allow that lossy form
   # only on a rerun where the tagged binding is already present; a first run
   # must still reject a foreign action that happens to use the same label.
-  managed_binding_present && allow_effective_description=1
-  if line="$(contains_foreign_f10 "$menu_effective" "$allow_effective_description" "$allow_effective_description")"; then
-    die "F10 is already bound; refusing to override: $line"
+  if managed_binding_present "$chord"; then
+    allow_ours=1
+    allow_effective_description=1
   fi
-  if line="$(contains_foreign_json_f10 "$hypr_effective" "$allow_effective_description")"; then
-    die "F10 is already bound; refusing to override: $line"
+  if line="$(contains_foreign_text_chord "$menu_effective" "$chord" "$allow_ours" "$allow_effective_description")"; then
+    die "$chord is already bound; refusing to override: $line"
   fi
-  if line="$(contains_foreign_f10 "$user" "$allow_effective_description" 0)"; then
-    die "F10 is already present in $BINDINGS; refusing to override: $line"
+  if line="$(contains_foreign_json_chord "$hypr_effective" "$chord" "$allow_ours" "$allow_effective_description")"; then
+    die "$chord is already bound; refusing to override: $line"
   fi
+  if line="$(contains_foreign_text_chord "$user" "$chord" "$allow_ours" 0)"; then
+    die "$chord is already present in $BINDINGS; refusing to override: $line"
+  fi
+}
+
+check_binding_conflicts() {
+  check_binding_conflict "f10"
+  check_binding_conflict "ctrl-f10"
 }
 
 download_verified() {
@@ -251,7 +318,8 @@ write_binding_block() {
   if [[ -s "$tmp" ]]; then printf '\n' >>"$tmp"; fi
   {
     printf '%s\n' "$BEGIN_MARKER"
-    printf '%s\n' 'o.bind("F10", "Read selected text aloud", "omarchy-shell omayap.read-aloud toggleSelection")'
+    printf '%s\n' "o.bind(\"F10\", \"$OWN_F10_DESCRIPTION\", \"$OWN_F10_COMMAND\")"
+    printf '%s\n' "o.bind(\"CTRL + F10\", \"$OWN_OCR_DESCRIPTION\", \"$OWN_OCR_COMMAND\")"
     printf '%s\n' "$END_MARKER"
   } >>"$tmp"
   chmod --reference="$target" "$tmp" 2>/dev/null || chmod 600 -- "$tmp"
@@ -289,13 +357,23 @@ install_binding() {
   if ! validate_hyprland; then
     if ((had_file)); then cp -p -- "$backup" "$BINDINGS"; else rm -f -- "$BINDINGS"; fi
     hyprctl reload >/dev/null 2>&1 || true
-    die "Hyprland rejected the F10 binding; the original bindings were restored"
+    die "Hyprland rejected the OmaYap bindings; the original bindings were restored"
   fi
-  echo "OmaYap setup: installed F10 binding (backup: $backup)"
+  echo "OmaYap setup: installed F10 and CTRL+F10 bindings (backup: $backup)"
 }
 
 main() {
   [[ -n "${HOME:-}" ]] || die "HOME is not set"
+  case "${1:-}" in
+    "") ;;
+    --help|-h)
+      echo "Usage: bin/setup"
+      echo "Installs the local Piper runtime and manages the F10 and CTRL+F10 OmaYap bindings."
+      echo "OCR uses Omarchy's local capture flow; Codex yaps are opt-in via bin/install-codex-skill."
+      return 0
+      ;;
+    *) die "unknown option: $1" ;;
+  esac
   if ! command -v uv >/dev/null 2>&1; then
     echo "OmaYap setup: uv is required. Install it with: omarchy pkg add uv" >&2
     exit 1
@@ -311,7 +389,7 @@ main() {
     require_command wtype
     require_command pw-play
   fi
-  check_f10_conflict
+  check_binding_conflicts
   prepare_runtime
   install_binding
   ensure_private_dir "${CONFIG_HOME}/omayap-read-aloud"

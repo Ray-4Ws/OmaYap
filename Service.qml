@@ -12,7 +12,9 @@ Item {
   property string omarchyPath: ""
 
   readonly property string pluginId: "omayap.read-aloud"
-  readonly property string pluginVersion: "1.1.0"
+  readonly property string pluginVersion: "1.3.0"
+  readonly property int workerProtocolVersion: 1
+  readonly property int maxWorkerRequestIdChars: 128
   readonly property string voiceName: "en_US-lessac-medium"
   readonly property int maxCharacters: 20000
   // The wrapper reads cap+1 bytes and emits no stdout on overflow.  This
@@ -26,6 +28,7 @@ Item {
   readonly property string home: Quickshell.env("HOME")
   readonly property string configHome: Quickshell.env("XDG_CONFIG_HOME") || (home + "/.config")
   readonly property string dataHome: Quickshell.env("XDG_DATA_HOME") || (home + "/.local/share")
+  readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") || ""
   readonly property string dataRoot: dataHome + "/omayap-read-aloud"
   readonly property string settingsPath: configHome + "/omayap-read-aloud/settings.json"
   readonly property string modelPath: dataRoot + "/models/en_US-lessac-medium.onnx"
@@ -44,6 +47,7 @@ Item {
   readonly property bool setupRequired: !setupReady
   property string status: "setup-required"
   property real speed: 1.0
+  property string cleanupProfile: "safe"
   property int characterCount: 0
   property string errorCode: "runtime-missing"
   // Keep the control busy until the worker acknowledges stop.  The worker
@@ -51,12 +55,21 @@ Item {
   // pressed; treating that interval as idle lets a second click start a new
   // selection before the old one is gone.
   property bool stopPending: false
+  property bool ocrBusy: false
+  property bool bridgeBusy: false
+  // A canceled helper may still deliver its collector/exit signals after
+  // running is set false.  Keep a replacement from reusing those fields
+  // until both signals have drained.
+  property bool ocrCancelPending: false
+  property bool bridgeCancelPending: false
   // A warm worker is useful while reading, but retaining ONNX Runtime's
   // allocator and model while the plugin is idle is expensive.  The worker
   // exits after this quiet period; the QML service and bar remain loaded.
   readonly property int workerIdleTimeoutMs: 60000
   property bool expectedWorkerExit: false
-  readonly property bool active: status === "capturing" || status === "loading" || status === "speaking" || status === "stopping"
+  property int requestSerial: 0
+  property bool workerProtocolErrorNotified: false
+  readonly property bool active: status === "capturing" || status === "loading" || status === "speaking" || status === "stopping" || root.ocrBusy || root.bridgeBusy || root.ocrCancelPending || root.bridgeCancelPending
 
   // Capture state is intentionally transient.  No selection is written to a
   // file or included in a process command line; it is sent only through the
@@ -116,11 +129,28 @@ Item {
   property bool settingsExited: false
   property bool settingsReadHandled: false
   property int settingsExitCode: -1
+  property string ocrOutput: ""
+  property bool ocrStreamFinished: false
+  property bool ocrExited: false
+  property bool ocrHandled: false
+  property int ocrExitCode: -1
+  property string bridgeOutput: ""
+  property bool bridgeStreamFinished: false
+  property bool bridgeExited: false
+  property bool bridgeHandled: false
+  property int bridgeExitCode: -1
+  property string bridgeToken: ""
+  property string bridgePath: ""
 
   function clampSpeed(value) {
     var number = Number(value)
     if (!isFinite(number)) number = 1.0
     return Math.max(0.5, Math.min(2.0, number))
+  }
+
+  function validCleanupProfile(value) {
+    var profile = String(value || "")
+    return ["off", "safe", "article"].indexOf(profile) !== -1 ? profile : "safe"
   }
 
   function notify(headline, description) {
@@ -152,6 +182,17 @@ Item {
     return count
   }
 
+  function validBridgeToken(value) {
+    return typeof value === "string" && /^[0-9a-f]{32}$/.test(value)
+  }
+
+  function bridgeFifoPath(token) {
+    var runtime = String(root.runtimeDir || "").replace(/\/+$/, "")
+    if (!runtime || runtime === "/" || runtime.indexOf("\n") !== -1 || runtime.indexOf("\0") !== -1)
+      return ""
+    return runtime + "/omayap-read-aloud/request-" + token + ".fifo"
+  }
+
   function rejectCapturedText(actual) {
     root.pendingCapturedText = ""
     root.captureStage = "idle"
@@ -178,10 +219,143 @@ Item {
     root.notify("OmaYap selection too long", "Selection exceeds the 20,000-character maximum. No text was read.")
   }
 
+  function finishOcr() {
+    if (!root.ocrBusy || !root.ocrExited || !root.ocrStreamFinished || root.ocrHandled) return
+    root.ocrHandled = true
+    var exitCode = Number(root.ocrExitCode)
+    var output = String(root.ocrOutput || "")
+    root.ocrBusy = false
+    root.ocrOutput = ""
+    if (exitCode === root.boundedOverflowExitCode) {
+      root.status = "idle"
+      root.errorCode = "ocr-too-long"
+      root.notify("OmaYap OCR selection too long", "The OCR result exceeds the 20,000-character maximum. No text was read.")
+      return
+    }
+    if (exitCode === 64 || exitCode === 65) {
+      root.status = "idle"
+      root.errorCode = "ocr-unsupported"
+      root.notify("OmaYap OCR unavailable", "The installed Omarchy OCR flow is not compatible with this OmaYap version.")
+      return
+    }
+    if (exitCode !== 0) {
+      root.status = "idle"
+      root.errorCode = "ocr-failed"
+      root.notify("OmaYap OCR failed", "The screen text could not be recognized. Try again or select text manually.")
+      return
+    }
+    if (output === "") {
+      // An empty successful native capture means the user canceled the region
+      // selection. Keep that path silent.
+      root.status = "idle"
+      root.errorCode = ""
+      return
+    }
+    var actual = root.codePointCount(output)
+    if (actual > root.maxCharacters) {
+      root.status = "idle"
+      root.errorCode = "selection-too-long"
+      root.notify("OmaYap OCR selection too long", actual.toLocaleString() + " characters recognized; maximum is " + root.maxCharacters.toLocaleString() + ".")
+      return
+    }
+    root.status = "idle"
+    root.errorCode = ""
+    root.workerCommand({
+      command: "speak",
+      text: output,
+      requestId: root.nextRequestId(),
+      cleanupProfile: root.cleanupProfile
+    })
+  }
+
+  function finishCancelledOcr() {
+    if (!root.ocrCancelPending || !root.ocrExited || !root.ocrStreamFinished) return
+    root.ocrCancelPending = false
+    root.ocrOutput = ""
+    root.ocrExitCode = -1
+  }
+
+  function cancelOcr() {
+    if (!root.ocrBusy) return
+    root.ocrBusy = false
+    root.ocrHandled = true
+    root.ocrOutput = ""
+    root.ocrCancelPending = !(root.ocrExited && root.ocrStreamFinished)
+    if (ocrProc.running) ocrProc.running = false
+    if (!root.ocrCancelPending) root.ocrOutput = ""
+  }
+
+  function finishBridge() {
+    if (!root.bridgeBusy || !root.bridgeExited || !root.bridgeStreamFinished || root.bridgeHandled) return
+    root.bridgeHandled = true
+    var exitCode = Number(root.bridgeExitCode)
+    var output = String(root.bridgeOutput || "")
+    var path = root.bridgePath
+    root.bridgeBusy = false
+    root.bridgeOutput = ""
+    root.bridgeToken = ""
+    root.bridgePath = ""
+    if (path) Quickshell.execDetached(["rm", "-f", "--", path])
+    if (exitCode === root.boundedOverflowExitCode) {
+      root.status = "idle"
+      root.errorCode = "yap-too-long"
+      root.notify("OmaYap alert too long", "The Codex alert exceeds the 20,000-character maximum. No text was read.")
+      return
+    }
+    if (exitCode !== 0) {
+      root.status = "idle"
+      root.errorCode = "yap-failed"
+      root.notify("OmaYap alert unavailable", "The Codex alert could not be received safely.")
+      return
+    }
+    if (output === "") {
+      root.status = "idle"
+      root.errorCode = ""
+      return
+    }
+    var actual = root.codePointCount(output)
+    if (actual > root.maxCharacters) {
+      root.status = "idle"
+      root.errorCode = "selection-too-long"
+      root.notify("OmaYap alert too long", actual.toLocaleString() + " characters received; maximum is " + root.maxCharacters.toLocaleString() + ".")
+      return
+    }
+    root.status = "idle"
+    root.errorCode = ""
+    root.workerCommand({
+      command: "speak",
+      text: output,
+      requestId: root.nextRequestId(),
+      cleanupProfile: root.cleanupProfile
+    })
+  }
+
+  function cancelBridge() {
+    if (!root.bridgeBusy) return
+    var path = root.bridgePath
+    root.bridgeBusy = false
+    root.bridgeHandled = true
+    root.bridgeOutput = ""
+    root.bridgeToken = ""
+    root.bridgePath = ""
+    root.bridgeCancelPending = !(root.bridgeExited && root.bridgeStreamFinished)
+    if (bridgeProc.running) bridgeProc.running = false
+    if (!root.bridgeCancelPending) root.bridgeOutput = ""
+    if (path) Quickshell.execDetached(["rm", "-f", "--", path])
+  }
+
+  function finishCancelledBridge() {
+    if (!root.bridgeCancelPending || !root.bridgeExited || !root.bridgeStreamFinished) return
+    root.bridgeCancelPending = false
+    root.bridgeOutput = ""
+    root.bridgeExitCode = -1
+  }
+
   function statusJson() {
     return JSON.stringify({
       status: root.status,
       speed: Number(root.speed.toFixed(3)),
+      cleanupProfile: root.cleanupProfile,
       characters: root.characterCount,
       voice: root.voiceName,
       setupRequired: root.setupRequired,
@@ -193,6 +367,8 @@ Item {
     try {
       var parsed = JSON.parse(String(raw || ""))
       if (parsed && parsed.speed !== undefined) root.speed = root.clampSpeed(parsed.speed)
+      if (parsed && parsed.cleanupProfile !== undefined)
+        root.cleanupProfile = root.validCleanupProfile(parsed.cleanupProfile)
     } catch (error) {
       // A malformed settings file is recoverable.  Keep the default speed and
       // let the next user change rewrite it with mode 0600.
@@ -209,7 +385,10 @@ Item {
   }
 
   function persistSpeed() {
-    var payload = JSON.stringify({ speed: Number(root.speed.toFixed(3)) })
+    var payload = JSON.stringify({
+      speed: Number(root.speed.toFixed(3)),
+      cleanupProfile: root.cleanupProfile
+    })
     settingsWriteProc.command = [
       "bash", "-c",
       "set -eu; umask 077; mkdir -p -- \"$(dirname -- \"$0\")\"; printf '%s\\n' \"$1\" > \"$0\"; chmod 600 -- \"$0\"",
@@ -228,6 +407,12 @@ Item {
     if (workerProc.running && !root.expectedWorkerExit)
       root.workerCommand({ command: "set-speed", speed: root.speed })
     return root.speed
+  }
+
+  function setCleanupProfile(value) {
+    root.cleanupProfile = root.validCleanupProfile(value)
+    root.persistSpeed()
+    return root.cleanupProfile
   }
 
   function probeSetup() {
@@ -253,17 +438,97 @@ Item {
     }
   }
 
+  function protocolCommand(command) {
+    var payload = {}
+    if (command) {
+      for (var key in command) payload[key] = command[key]
+    }
+    payload.protocolVersion = root.workerProtocolVersion
+    return payload
+  }
+
+  function writeWorkerCommand(command) {
+    workerProc.write(JSON.stringify(root.protocolCommand(command)) + "\n")
+  }
+
+  function nextRequestId() {
+    root.requestSerial += 1
+    return "selection-" + String(root.requestSerial)
+  }
+
+  function rejectWorkerEvent(errorCode) {
+    workerIdleTimer.stop()
+    root.characterCount = 0
+    root.errorCode = String(errorCode || "worker-protocol-invalid")
+    root.status = "error"
+    if (!root.workerProtocolErrorNotified) {
+      root.workerProtocolErrorNotified = true
+      root.notify("OmaYap error", root.errorCode === "unsupported-protocol-version"
+        ? "The TTS backend uses an unsupported protocol version."
+        : "The TTS backend returned invalid protocol metadata.")
+    }
+  }
+
+  function validWorkerEvent(parsed) {
+    // Missing protocolVersion is accepted for older workers; an explicit
+    // value must be the integer protocol version this service understands.
+    var version = parsed.protocolVersion
+    if (version === undefined) version = root.workerProtocolVersion
+    if (typeof version !== "number" || !isFinite(version)
+        || Math.floor(version) !== version || version !== root.workerProtocolVersion) {
+      root.rejectWorkerEvent("unsupported-protocol-version")
+      return false
+    }
+    if (parsed.requestId !== undefined
+        && (typeof parsed.requestId !== "string"
+          || parsed.requestId.length === 0
+          || parsed.requestId.length > root.maxWorkerRequestIdChars)) {
+      root.rejectWorkerEvent("invalid-request-id")
+      return false
+    }
+    if (parsed.cleanupProfile !== undefined
+        && (typeof parsed.cleanupProfile !== "string"
+          || ["off", "safe", "article"].indexOf(parsed.cleanupProfile) === -1)) {
+      root.rejectWorkerEvent("invalid-cleanup-profile")
+      return false
+    }
+    if (typeof parsed.status !== "string"
+        || ["setup-required", "idle", "capturing", "loading", "speaking", "stopping", "error"].indexOf(parsed.status) === -1) {
+      root.rejectWorkerEvent("worker-protocol-invalid")
+      return false
+    }
+    if (typeof parsed.speed !== "number" || !isFinite(parsed.speed)) {
+      root.rejectWorkerEvent("worker-protocol-invalid")
+      return false
+    }
+    if (typeof parsed.characters !== "number" || !isFinite(parsed.characters)
+        || Math.floor(parsed.characters) !== parsed.characters
+        || parsed.characters < 0 || parsed.characters > root.maxCharacters) {
+      root.rejectWorkerEvent("worker-protocol-invalid")
+      return false
+    }
+    if (parsed.errorCode !== undefined
+        && (typeof parsed.errorCode !== "string"
+          || (parsed.errorCode !== "" && !/^[a-z0-9-]{1,64}$/.test(parsed.errorCode)))) {
+      root.rejectWorkerEvent("worker-protocol-invalid")
+      return false
+    }
+    root.workerProtocolErrorNotified = false
+    return true
+  }
+
   function workerCommand(command) {
     if (root.setupRequired) return
     // A speed change while the worker is cold only updates settings and must
     // not start it.
     if (command && command.command === "set-speed" && !workerProc.running) return
+    var payload = root.protocolCommand(command)
     // A shutdown may already be in the worker's stdin pipe when the user
     // starts a new read at the exact eviction boundary.  Queue that read for
     // the fresh worker instead of writing behind shutdown.
     if (root.expectedWorkerExit) {
       var evictionQueue = root.pendingWorkerCommands
-      evictionQueue.push(command)
+      evictionQueue.push(payload)
       root.pendingWorkerCommands = evictionQueue
       return
     }
@@ -271,7 +536,7 @@ Item {
     root.expectedWorkerExit = false
     if (!workerProc.running) {
       var queue = root.pendingWorkerCommands
-      queue.push(command)
+      queue.push(payload)
       root.pendingWorkerCommands = queue
       workerProc.command = [
         root.pythonPath,
@@ -282,13 +547,13 @@ Item {
       workerProc.running = true
       return
     }
-    workerProc.write(JSON.stringify(command) + "\n")
+    root.writeWorkerCommand(payload)
   }
 
   function flushWorkerCommands() {
     var commands = root.pendingWorkerCommands
     root.pendingWorkerCommands = []
-    for (var i = 0; i < commands.length; i++) workerProc.write(JSON.stringify(commands[i]) + "\n")
+    for (var i = 0; i < commands.length; i++) root.writeWorkerCommand(commands[i])
   }
 
   function handleWorkerLine(raw) {
@@ -299,6 +564,7 @@ Item {
       return
     }
     if (!parsed || parsed.event !== "state") return
+    if (!root.validWorkerEvent(parsed)) return
 
     var nextStatus = String(parsed.status || "")
     if (["setup-required", "idle", "capturing", "loading", "speaking", "stopping", "error"].indexOf(nextStatus) !== -1)
@@ -345,7 +611,7 @@ Item {
     // A fallback capture may still be restoring the user's clipboard. Do not
     // start another capture until that asynchronous restore has completed; an
     // old wl-copy exit would otherwise clear the new capture's state.
-    if (root.captureStage === "restore" || root.stopPending) return
+    if (root.captureStage === "restore" || root.stopPending || root.ocrBusy || root.bridgeBusy) return
     if (root.setupRequired) {
       root.setupHint()
       return
@@ -367,6 +633,53 @@ Item {
     primaryTypesProc.running = true
   }
 
+  function readOcr() {
+    if (root.setupRequired) {
+      root.setupHint()
+      return "unavailable"
+    }
+    // OCR capture is intentionally independent of CLIPBOARD and cannot
+    // interrupt a selection, another OCR capture, playback, or a Codex alert.
+    if (root.active || root.captureStage !== "idle" || root.stopPending || root.ocrCancelPending || root.bridgeCancelPending || ocrProc.running) return "busy"
+    root.ocrBusy = true
+    root.status = "capturing"
+    root.errorCode = ""
+    root.ocrOutput = ""
+    root.ocrStreamFinished = false
+    root.ocrExited = false
+    root.ocrHandled = false
+    root.ocrExitCode = -1
+    ocrProc.command = root.boundedCommand(root.selectionByteCap, [root.pluginRoot + "/bin/capture-ocr"])
+    ocrProc.running = false
+    ocrProc.running = true
+    return "ok"
+  }
+
+  function speakRequest(token) {
+    if (!root.validBridgeToken(token)) return "invalid"
+    if (root.setupRequired || root.stopPending) return "unavailable"
+    if (root.active || root.captureStage !== "idle" || root.ocrBusy || root.bridgeBusy || root.ocrCancelPending || root.bridgeCancelPending || bridgeProc.running)
+      return "busy"
+    var path = root.bridgeFifoPath(token)
+    if (!path) return "unavailable"
+    root.bridgeToken = token
+    root.bridgePath = path
+    root.bridgeOutput = ""
+    root.bridgeStreamFinished = false
+    root.bridgeExited = false
+    root.bridgeHandled = false
+    root.bridgeExitCode = -1
+    root.bridgeBusy = true
+    root.status = "capturing"
+    root.errorCode = ""
+    // The token is the only dynamic component. The fixed path is read through
+    // bounded_capture so the FIFO cannot provide unbounded memory to QML.
+    bridgeProc.command = root.boundedCommand(root.selectionByteCap, [root.pluginRoot + "/bin/read-yap-fifo", token])
+    bridgeProc.running = false
+    bridgeProc.running = true
+    return "ok"
+  }
+
   function toggleSelection() {
     if (root.stopPending) return
     if (root.active) root.stop()
@@ -376,10 +689,12 @@ Item {
   function stop() {
     if (root.stopPending) return
     workerIdleTimer.stop()
+    root.cancelOcr()
+    root.cancelBridge()
     root.cancelCapture(true)
     root.pendingWorkerCommands = []
     root.stopPending = workerProc.running
-    if (root.stopPending) workerProc.write(JSON.stringify({ command: "stop" }) + "\n")
+    if (root.stopPending) root.writeWorkerCommand({ command: "stop" })
     root.characterCount = 0
     root.errorCode = ""
     root.status = root.stopPending ? "stopping" : (root.setupRequired ? "setup-required" : "idle")
@@ -401,7 +716,7 @@ Item {
       return
     }
     root.expectedWorkerExit = true
-    workerProc.write(JSON.stringify({ command: "shutdown" }) + "\n")
+    root.writeWorkerCommand({ command: "shutdown" })
     // Some ONNX Runtime builds spend longer than a user-visible interval in
     // native teardown.  The worker is dedicated to OmaYap, so terminate it
     // after a short grace period to guarantee the model is actually evicted.
@@ -427,7 +742,12 @@ Item {
       root.rejectCapturedText(actual)
       return
     }
-    root.workerCommand({ command: "read-selection", text: text })
+    root.workerCommand({
+      command: "speak",
+      text: text,
+      requestId: root.nextRequestId(),
+      cleanupProfile: root.cleanupProfile
+    })
   }
 
   function finishRestore(exitCode) {
@@ -770,6 +1090,44 @@ Item {
   Process { id: settingsWriteProc }
 
   Process {
+    id: ocrProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.ocrOutput = String(text || "")
+        root.ocrStreamFinished = true
+        if (root.ocrCancelPending) root.finishCancelledOcr()
+        else root.finishOcr()
+      }
+    }
+    onExited: function(exitCode) {
+      root.ocrExitCode = exitCode
+      root.ocrExited = true
+      if (root.ocrCancelPending) root.finishCancelledOcr()
+      else root.finishOcr()
+    }
+  }
+
+  Process {
+    id: bridgeProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.bridgeOutput = String(text || "")
+        root.bridgeStreamFinished = true
+        if (root.bridgeCancelPending) root.finishCancelledBridge()
+        else root.finishBridge()
+      }
+    }
+    onExited: function(exitCode) {
+      root.bridgeExitCode = exitCode
+      root.bridgeExited = true
+      if (root.bridgeCancelPending) root.finishCancelledBridge()
+      else root.finishBridge()
+    }
+  }
+
+  Process {
     id: setupProbe
     stdout: StdioCollector {
       waitForEnd: true
@@ -790,8 +1148,9 @@ Item {
     }
     onStarted: {
       root.expectedWorkerExit = false
+      root.workerProtocolErrorNotified = false
       workerIdleTimer.stop()
-      write(JSON.stringify({ command: "set-speed", speed: root.speed }) + "\n")
+      root.writeWorkerCommand({ command: "set-speed", speed: root.speed })
       root.flushWorkerCommands()
     }
     onExited: function(exitCode) {
@@ -1045,6 +1404,10 @@ Item {
       return "ok"
     }
 
+    function readOcr(): string {
+      return root.readOcr()
+    }
+
     function stop(): string {
       root.stop()
       return "ok"
@@ -1052,6 +1415,14 @@ Item {
 
     function setSpeed(value: string): string {
       return String(root.setSpeed(value))
+    }
+
+    function setCleanupProfile(value: string): string {
+      return root.setCleanupProfile(value)
+    }
+
+    function speakRequest(token: string): string {
+      return root.speakRequest(token)
     }
 
     function status(): string {
@@ -1073,7 +1444,9 @@ Item {
   }
 
   Component.onDestruction: {
+    root.cancelOcr()
+    root.cancelBridge()
     root.cancelCapture(true)
-    if (workerProc.running) workerProc.write(JSON.stringify({ command: "shutdown" }) + "\n")
+    if (workerProc.running) root.writeWorkerCommand({ command: "shutdown" })
   }
 }

@@ -35,12 +35,14 @@ omarchy plugin add https://github.com/Ray-4Ws/OmaYap --enable
 - downloads the official voice model, JSON configuration, and model card with
   pinned SHA-256 checksums;
 - runs a silent synthesis smoke test; and
-- checks both effective and user F10 bindings before adding one tagged binding.
+- checks both effective and user F10 and Ctrl+F10 bindings before adding its
+  two tagged bindings.
 
-If F10 is already used, setup refuses to override it. If the binding is free,
-setup backs up `~/.config/hypr/bindings.lua`, adds the tagged block, reloads
-Hyprland, and checks `hyprctl configerrors`. A failed validation rolls the
-binding back. Re-running setup is safe and replaces only its own tagged block.
+If either exact chord is already used, setup refuses to override it. If both
+bindings are free, setup backs up `~/.config/hypr/bindings.lua`, adds the
+tagged block, reloads Hyprland, and checks `hyprctl configerrors`. A failed
+validation rolls the bindings back. Re-running setup is safe and replaces only
+its own tagged block.
 
 The model is about 63 MB and setup needs network access. Runtime and model data
 are private (`0700` directories, `0600` files). This repository does not run
@@ -58,13 +60,41 @@ read starts a fresh worker with the saved speed.
 - Left-click the bar icon to read the selection, or to stop active playback.
 - Right-click the icon for status, character count, the fixed voice name, and
   the `0.5×–2.0×` speed slider. Speed changes are persisted in
-  `~/.config/omayap-read-aloud/settings.json` and affect the next chunk.
+  `~/.config/omayap-read-aloud/settings.json` and affect the next chunk. The
+  same popup selects the reading cleanup profile: **Safe** (the default),
+  **Off**, or **Article**.
+- Use **Ctrl+F10** or the bar popup's **Read text from screen (OCR)** action to
+  run Omarchy's installed local screen-text capture. It does not modify
+  CLIPBOARD; the native OCR language setting is inherited from
+  `OMARCHY_OCR_LANGS`. Empty capture means cancellation, and recognized text
+  is capped at 20,000 Unicode code points before it reaches Piper.
 - The service IPC target is `omayap.read-aloud` with `toggleSelection`,
-  `readSelection`, `stop`, `setSpeed`, and `status` methods.
+  `readSelection`, `readOcr`, `speakRequest`, `stop`, `setSpeed`,
+  `setCleanupProfile`, and `status` methods. `speakRequest` is the private
+  FIFO entry point used by the optional Codex bridge.
+- The private backend stdin/stdout contract is documented in
+  [`docs/backend-protocol.md`](docs/backend-protocol.md); selection reads use
+  its generic `speak` command.
 
-F10 is installed by setup rather than by the plugin manifest because Omarchy
-plugin installation does not modify keybindings. The bar widget defaults to
-the right section and cannot be duplicated.
+F10 and Ctrl+F10 are installed by setup rather than by the plugin manifest
+because Omarchy plugin installation does not modify keybindings. The bar
+widget defaults to the right section and cannot be duplicated.
+
+### Codex yaps (optional)
+
+The repository includes an instruction-only Codex skill for fixed completion,
+permission, attention, and failure alerts, plus short custom alerts. Install
+it explicitly when wanted; setup never installs it automatically:
+
+```bash
+~/.config/omarchy/plugins/omayap.read-aloud/bin/install-codex-skill
+```
+
+The `omayap-yaps` skill sends fixed event text by default. Custom text must be
+provided through the `bin/yap custom` process's stdin, never as an argument,
+environment value, notification, log, or regular temporary file. The bridge
+uses a private, short-lived FIFO under `XDG_RUNTIME_DIR`; it is local and
+bounded to the same 20,000-code-point limit.
 
 ## Selection and privacy
 
@@ -91,9 +121,13 @@ selection API: applications that refuse copy access, protected documents, and
 some sandboxed/XWayland clients cannot be supported automatically. Copy such a
 selection manually and try again.
 
-Selected text is held only in process memory and worker stdin. It is never
+Selected and OCR text is held only in process memory and worker stdin. It is never
 placed in command-line arguments, worker stdout, logs, settings, or
-notifications. Every replaceable command that produces data for QML runs
+notifications. OCR uses the installed Omarchy capture flow through a
+fail-closed adapter: only its reviewed stdout-through-`wl-copy` contract is
+intercepted, and the adapter supplies a stdout-only shim while making the
+native notification command silent. No clipboard write is performed by
+OmaYap's OCR path. Every replaceable command that produces data for QML runs
 through the dependency-free `share/bounded_capture.py` helper: MIME metadata
 is capped at 4 KiB, selection reads at 80,004 bytes (enough to count 20,001
 four-byte UTF-8 code points), active-window metadata at 16 KiB, and the
@@ -106,9 +140,10 @@ no usable count and gets only a fixed-limit notification. An oversized
 clipboard backup is refused before the clipboard is cleared, so it can never
 be restored truncated. Empty/stale selections are not spoken.
 
-The local voice is CPU-based and English-only in this v1. There is no cloud TTS
-endpoint, language detection, OCR, document import, pause/seek UI, or voice
-marketplace.
+The current bundled voice is CPU-based and English-only. There is no cloud TTS
+endpoint, language detection, document import, pause/seek UI, or voice
+marketplace. OCR remains local to Omarchy's installed capture tools; it does
+not upload screenshots or recognized text.
 
 ## Update and remove
 
@@ -137,8 +172,8 @@ then remove the Omarchy checkout:
 omarchy plugin remove omayap.read-aloud
 ```
 
-Uninstall stops playback, removes only the tagged F10 block, validates
-Hyprland, and preserves model/runtime/settings data. To delete only those
+Uninstall stops playback, removes only the tagged F10 and Ctrl+F10 block,
+validates Hyprland, and preserves model/runtime/settings data. To delete only those
 plugin-owned data directories after an explicit confirmation:
 
 ```bash
@@ -154,6 +189,11 @@ the live Hyprland configuration:
 ```bash
 tests/run
 ```
+
+The rationale for retaining the current Python backend is recorded in
+[`docs/native-backend-decision.md`](docs/native-backend-decision.md). The
+controlled serialization comparison is recorded in
+[`docs/memory-benchmark-results.md`](docs/memory-benchmark-results.md).
 
 To measure cold-start latency and worker memory, use the installed runtime and
 model. The practical default matrix uses a 1,000-character input with
@@ -176,12 +216,46 @@ never enables that mode. The benchmark discards PCM after synthesis, so its
 memory results do not include a `pw-play` process. It exits nonzero if any case
 fails or times out.
 
+To check whether memory grows across reads in one long-lived worker, use the
+same-process modes. Each mode defaults to 10 cycles and records one result per
+cycle, including peak and post-completion settled PSS, private-dirty,
+anonymous memory, and thread counts. `settled_*` is the last sample after
+`--settle-time` seconds; compare it across cycles to distinguish a rising
+baseline from allocator high-water retention:
+
+```bash
+# Completed reads with no interruption between cycles
+~/.local/share/omayap-read-aloud/venv/bin/python \
+  benchmarks/memory.py --repeat-mode serial --repeat-cycles 10 \
+  --lengths 5000 --chunk-targets 800 --format csv \
+  --output /tmp/omayap-repeat-serial.csv
+
+# Stop, then immediately submit a replacement read on every cycle
+~/.local/share/omayap-read-aloud/venv/bin/python \
+  benchmarks/memory.py --repeat-mode interrupt --repeat-cycles 10 \
+  --lengths 5000 --chunk-targets 800 --format csv \
+  --output /tmp/omayap-repeat-interrupt.csv
+```
+
+Repeat reports use schema 2. In interrupt mode, `completion_event` must be
+`replacement-idle`; `stop_idle_events` counts idle events observed after the
+stop request and before replacement work, while `replacement_idle_events`
+counts the idle event that actually completed the replacement read. The input
+is synthetic and is sent only through the worker's private stdin; no selected
+or generated text is written to the report, command line, or diagnostics. The
+harness cannot observe the number of ONNX `session.run` calls active inside
+Piper because the worker protocol intentionally exposes no inference-level
+instrumentation; use the interrupt-mode memory and timing series as external
+evidence of retention or overlap. The original cold benchmark remains the
+default when `--repeat-mode` is omitted.
+
 The final validation used for a checkout is:
 
 ```bash
 tests/run
 omarchy plugin validate .
-bash -n bin/setup bin/uninstall tests/run
-python3 -m compileall -q worker share tests benchmarks
+bash -n bin/setup bin/capture-ocr bin/yap bin/read-yap-fifo \
+  bin/install-codex-skill bin/uninstall tests/run
+python3 -m compileall -q worker share tests benchmarks bin/yap bin/read-yap-fifo
 git diff --check
 ```

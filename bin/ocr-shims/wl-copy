@@ -1,0 +1,7 @@
+#!/bin/sh
+# Test/runtime shim used only by bin/capture-ocr: preserve OCR stdout instead
+# of mutating the user's clipboard. Any native argument change fails closed.
+if [ "$#" -ne 0 ]; then
+  exit 64
+fi
+exec cat

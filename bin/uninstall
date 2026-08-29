@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Remove only the plugin's tagged F10 binding.  Runtime/model/settings data is
+# Remove only the plugin's tagged F10/CTRL+F10 bindings. Runtime/model/settings data is
 # retained unless the caller explicitly requests --purge and confirms it.
 set -Eeuo pipefail
 
@@ -59,7 +59,7 @@ remove_binding() {
     hyprctl reload >/dev/null 2>&1 || true
     die "Hyprland rejected the edited bindings; the original bindings were restored"
   fi
-  echo "OmaYap uninstall: removed the tagged F10 binding (backup: $backup)"
+  echo "OmaYap uninstall: removed the tagged F10 and CTRL+F10 bindings (backup: $backup)"
 }
 
 safe_purge_path() {
@@ -96,7 +96,7 @@ main() {
     --purge) purge_data ;;
     --help|-h)
       echo "Usage: bin/uninstall [--purge]"
-      echo "Removes only the tagged F10 binding; --purge also removes plugin runtime/settings after confirmation."
+      echo "Removes only the tagged F10 and CTRL+F10 bindings; --purge also removes plugin runtime/settings after confirmation."
       ;;
     *) die "unknown option: $1" ;;
   esac

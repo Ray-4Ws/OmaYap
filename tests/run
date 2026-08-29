@@ -10,9 +10,9 @@ grep -Fqx -- '    "displayName": "OmaYap",' "$ROOT/manifest.json"
 grep -Fqx -- '# OmaYap' "$ROOT/README.md"
 grep -Fq -- '`OmaYap` is an Omarchy shell plugin' "$ROOT/README.md"
 grep -Fq -- 'https://github.com/Ray-4Ws/OmaYap' "$ROOT/README.md"
-grep -Fqx -- '  "version": "1.1.0",' "$ROOT/manifest.json"
-grep -Fqx -- '  readonly property string pluginVersion: "1.1.0"' "$ROOT/Service.qml"
-grep -Fqx -- 'PLUGIN_VERSION="1.1.0"' "$ROOT/bin/setup"
+grep -Fqx -- '  "version": "1.3.0",' "$ROOT/manifest.json"
+grep -Fqx -- '  readonly property string pluginVersion: "1.3.0"' "$ROOT/Service.qml"
+grep -Fqx -- 'PLUGIN_VERSION="1.3.0"' "$ROOT/bin/setup"
 ! rg -n -F 'Read aloud setup required' "$ROOT/Service.qml" "$ROOT/BarWidget.qml"
 ! rg -n -F 'Read aloud error' "$ROOT/Service.qml" "$ROOT/BarWidget.qml"
 grep -Fq -- 'property bool stopPending: false' "$ROOT/Service.qml"
@@ -43,7 +43,7 @@ grep -Fq -- 'var low = text.charCodeAt(index + 1)' "$ROOT/Service.qml"
 ! grep -Fq -- 'root.rejectCapturedText(20001)' "$ROOT/Service.qml"
 grep -Fq -- 'Selection exceeds the 20,000-character maximum. No text was read.' "$ROOT/Service.qml"
 [[ "$(grep -Fc -- 'root.boundedCommand(root.mimeByteCap' "$ROOT/Service.qml")" -eq 2 ]]
-[[ "$(grep -Fc -- 'root.boundedCommand(root.selectionByteCap' "$ROOT/Service.qml")" -eq 2 ]]
+[[ "$(grep -Fc -- 'root.boundedCommand(root.selectionByteCap' "$ROOT/Service.qml")" -ge 2 ]]
 grep -Fq -- 'root.boundedCommand(root.clipboardByteCap' "$ROOT/Service.qml"
 grep -Fq -- 'root.boundedCommand(root.activeWindowByteCap' "$ROOT/Service.qml"
 grep -Fq -- 'settingsReadProc.command = ["head", "-c", "4097"' "$ROOT/Service.qml"
@@ -69,8 +69,67 @@ grep -Fq -- '"--legacy-defaults"' "$ROOT/worker/worker.py"
 grep -Fq -- '"--discard-audio"' "$ROOT/worker/worker.py"
 grep -Fq -- 'DEFAULT_CHUNK_TARGETS = (200, 400, 800)' "$ROOT/benchmarks/memory.py"
 grep -Fq -- 'parse_smaps_rollup' "$ROOT/benchmarks/memory.py"
+grep -Fq -- 'PROTOCOL_VERSION = 1' "$ROOT/worker/worker.py"
+grep -Fq -- 'command in {"speak", "read-selection"}' "$ROOT/worker/worker.py"
+grep -Fq -- 'unsupported-protocol-version' "$ROOT/worker/worker.py"
+grep -Fq -- 'invalid-request-id' "$ROOT/worker/worker.py"
+grep -Fq -- 'CLEANUP_PROFILES = ("off", "safe", "article")' "$ROOT/worker/worker.py"
+grep -Fq -- 'DEFAULT_CLEANUP_PROFILE = "safe"' "$ROOT/worker/worker.py"
+grep -Fq -- 'cleanupProfile' "$ROOT/worker/worker.py"
+grep -Fq -- 'invalid-cleanup-profile' "$ROOT/worker/worker.py"
+grep -Fq -- 'readonly property int workerProtocolVersion: 1' "$ROOT/Service.qml"
+grep -Fq -- 'command: "speak"' "$ROOT/Service.qml"
+grep -Fq -- 'property string cleanupProfile: "safe"' "$ROOT/Service.qml"
+grep -Fq -- 'cleanupProfiles: ["off", "safe", "article"]' "$ROOT/BarWidget.qml"
+grep -Fq -- 'function setCleanupProfile(value)' "$ROOT/BarWidget.qml"
+grep -Fq -- 'protocolCommand(command)' "$ROOT/Service.qml"
+grep -Fq -- 'validWorkerEvent(parsed)' "$ROOT/Service.qml"
+test -f "$ROOT/docs/backend-protocol.md"
+grep -Fq -- 'backend protocol v1' "$ROOT/docs/backend-protocol.md"
+grep -Fq -- 'cleanupProfile' "$ROOT/docs/backend-protocol.md"
+grep -Fq -- 'DEFAULT_REPEAT_CYCLES = 10' "$ROOT/benchmarks/memory.py"
+grep -Fq -- 'choices=("none", "serial", "interrupt")' "$ROOT/benchmarks/memory.py"
+grep -Fq -- 'completion_event = "replacement-idle"' "$ROOT/benchmarks/memory.py"
+grep -Fq -- 'render_repeat' "$ROOT/benchmarks/memory.py"
+grep -Fq -- '--repeat-mode serial' "$ROOT/README.md"
+grep -Fq -- '--repeat-mode interrupt' "$ROOT/README.md"
+grep -Fq -- 'stop_idle_events' "$ROOT/README.md"
+grep -Fq -- 'bin/capture-ocr' "$ROOT/Service.qml"
+grep -Fq -- 'function readOcr()' "$ROOT/Service.qml"
+grep -Fq -- 'function speakRequest(token)' "$ROOT/Service.qml"
+grep -Fq -- 'read-yap-fifo' "$ROOT/Service.qml"
+grep -Fq -- 'id: ocrProc' "$ROOT/Service.qml"
+grep -Fq -- 'id: bridgeProc' "$ROOT/Service.qml"
+grep -Fq -- 'function finishCancelledOcr()' "$ROOT/Service.qml"
+grep -Fq -- 'function finishCancelledBridge()' "$ROOT/Service.qml"
+! rg -n -F '"cat"' "$ROOT/Service.qml"
+grep -Fq -- 'readOcr' "$ROOT/BarWidget.qml"
+grep -Fq -- 'Ctrl+F10' "$ROOT/BarWidget.qml"
+grep -Fq -- 'CTRL + F10' "$ROOT/bin/setup"
+grep -Fq -- 'modmask' "$ROOT/bin/setup"
+grep -Fq -- 'F10 and CTRL+F10' "$ROOT/bin/uninstall"
+test -x "$ROOT/bin/capture-ocr"
+test -x "$ROOT/bin/yap"
+test -x "$ROOT/bin/read-yap-fifo"
+test -x "$ROOT/bin/install-codex-skill"
+test -x "$ROOT/bin/ocr-shims/wl-copy"
+test -x "$ROOT/bin/ocr-shims/omarchy-notification-send"
+test -f "$ROOT/extras/codex-skill/omayap-yaps/SKILL.md"
+grep -Fq -- 'XDG_RUNTIME_DIR' "$ROOT/bin/yap"
+grep -Fq -- 'speakRequest' "$ROOT/bin/yap"
+grep -Fq -- 'OMARCHY_OCR_LANGS' "$ROOT/bin/capture-ocr"
+grep -Fq -- 'native command' "$ROOT/bin/capture-ocr"
+grep -Fq -- 'OCR' "$ROOT/README.md"
+grep -Fq -- 'CLIPBOARD' "$ROOT/README.md"
+grep -Fq -- 'OMARCHY_OCR_LANGS' "$ROOT/README.md"
+grep -Fq -- 'install-codex-skill' "$ROOT/README.md"
+grep -Fq -- 'adapters outside this transport' "$ROOT/docs/backend-protocol.md"
+grep -Fq -- 'regular file' "$ROOT/docs/backend-protocol.md"
+grep -Fq -- 'docs/native-backend-decision.md' "$ROOT/README.md"
+grep -Fq -- 'docs/memory-benchmark-results.md' "$ROOT/README.md"
 
 python3 -m unittest -v tests.test_worker
+python3 -m unittest -v tests.test_integrations
 
 if command -v omarchy >/dev/null 2>&1; then
   (cd "$ROOT" && omarchy plugin validate .)
@@ -142,9 +201,52 @@ if run_setup >/dev/null 2>&1; then
 fi
 : >"$FAKE_EFFECTIVE"
 
+printf '%s\n' 'CTRL + F10 Foreign OCR action' >"$FAKE_EFFECTIVE"
+if run_setup >/dev/null 2>&1; then
+  echo "setup incorrectly trusted an unmanaged CTRL+F10 description" >&2
+  exit 1
+fi
+: >"$FAKE_EFFECTIVE"
+
+printf '%s\n' 'SUPER + CTRL + F10 Foreign combined action' >"$FAKE_EFFECTIVE"
+if ! run_setup >/dev/null 2>&1; then
+  echo "setup incorrectly treated SUPER+CTRL+F10 as CTRL+F10" >&2
+  exit 1
+fi
+rm -f -- "$config/hypr/bindings.lua"
+: >"$FAKE_EFFECTIVE"
+
+printf '%s\n' 'CTRL + SHIFT + F10 Foreign combined action' >"$FAKE_EFFECTIVE"
+if ! run_setup >/dev/null 2>&1; then
+  echo "setup incorrectly treated CTRL+SHIFT+F10 as CTRL+F10" >&2
+  exit 1
+fi
+rm -f -- "$config/hypr/bindings.lua"
+: >"$FAKE_EFFECTIVE"
+
+cat >"$config/hypr/bindings.lua" <<'EOF'
+-- BEGIN OMAYAP_READ_ALOUD_F10
+o.bind("F10", "Read selected text aloud", "omarchy-shell omayap.read-aloud toggleSelection")
+-- END OMAYAP_READ_ALOUD_F10
+EOF
+printf '%s\n' 'CTRL + F10 Read screen text aloud (OCR)' >"$FAKE_EFFECTIVE"
+if run_setup >/dev/null 2>&1; then
+  echo "setup trusted a lossy CTRL+F10 description from an old partial block" >&2
+  exit 1
+fi
+rm -f -- "$config/hypr/bindings.lua"
+: >"$FAKE_EFFECTIVE"
+
 printf '%s\n' '[{"key":"F10","dispatcher":"exec","arg":"omarchy-shell omayap.read-aloud toggleSelection","description":"Read selected text aloud"}]' >"$FAKE_BINDS"
 if run_setup >/dev/null 2>&1; then
   echo "setup trusted an unmanaged exact-command F10 JSON binding" >&2
+  exit 1
+fi
+: >"$FAKE_BINDS"
+
+printf '%s\n' '[{"key":"F10","modmask":4,"dispatcher":"exec","arg":"foreign-action","description":"Foreign CTRL+F10 action"}]' >"$FAKE_BINDS"
+if run_setup >/dev/null 2>&1; then
+  echo "setup missed a foreign CTRL+F10 binding in hyprctl JSON" >&2
   exit 1
 fi
 : >"$FAKE_BINDS"
@@ -156,10 +258,19 @@ if run_setup >/dev/null 2>&1; then
 fi
 rm -f -- "$config/hypr/bindings.lua"
 
+printf '%s\n' 'o.bind("CTRL + F10", "Foreign OCR action", "foreign-action")' >"$config/hypr/bindings.lua"
+if run_setup >/dev/null 2>&1; then
+  echo "setup trusted an unmanaged CTRL+F10 Lua binding" >&2
+  exit 1
+fi
+rm -f -- "$config/hypr/bindings.lua"
+
 run_setup
 grep -Fqx -- '-- BEGIN OMAYAP_READ_ALOUD_F10' "$config/hypr/bindings.lua"
 grep -Fqx -- '-- END OMAYAP_READ_ALOUD_F10' "$config/hypr/bindings.lua"
 [[ "$(grep -Fc 'omayap.read-aloud toggleSelection' "$config/hypr/bindings.lua")" == 1 ]]
+[[ "$(grep -Fc 'omayap.read-aloud readOcr' "$config/hypr/bindings.lua")" == 1 ]]
+grep -Fqx -- 'o.bind("CTRL + F10", "Read screen text aloud (OCR)", "omarchy-shell omayap.read-aloud readOcr")' "$config/hypr/bindings.lua"
 [[ -f "$data/omayap-read-aloud/runtime-version" ]]
 rg -Fq 'PLUGIN_VERSION=$4' "$ROOT/Service.qml"
 
@@ -170,6 +281,10 @@ run_setup
 [[ "$(grep -Fc 'omayap.read-aloud toggleSelection' "$config/hypr/bindings.lua")" == 1 ]]
 second_binding_hash="$(sha256sum "$config/hypr/bindings.lua" | cut -d' ' -f1)"
 [[ "$first_binding_hash" == "$second_binding_hash" ]]
+
+printf '%s\n' 'F10 Read selected text aloud' 'CTRL + F10 Read screen text aloud (OCR)' >"$FAKE_EFFECTIVE"
+printf '%s\n' '[{"key":"F10","modmask":0,"dispatcher":"__lua","arg":"270","description":"Read selected text aloud"},{"key":"F10","modmask":4,"dispatcher":"__lua","arg":"271","description":"Read screen text aloud (OCR)"}]' >"$FAKE_BINDS"
+run_setup
 
 printf '%s\n' '[{"key":"F10","dispatcher":"__lua","arg":"270","description":"Read selected text aloud"},{"key":"F10","dispatcher":"exec","arg":"foreign-action","description":"Foreign F10 action"}]' >"$FAKE_BINDS"
 if run_setup >/dev/null 2>&1; then
