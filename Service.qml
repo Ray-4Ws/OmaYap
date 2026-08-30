@@ -51,6 +51,7 @@ Item {
   }
 
   property bool setupReady: false
+  property bool setupProbeCompleted: false
   readonly property bool setupRequired: !setupReady
   property string status: "setup-required"
   property real speed: 1.0
@@ -486,6 +487,15 @@ Item {
     return true
   }
 
+  function queueReadUntilReady(action) {
+    if (["selection", "ocr"].indexOf(action) === -1) return false
+    if (!root.setupProbeCompleted) {
+      root.pendingReadAfterVoiceList = action
+      return true
+    }
+    return root.queueReadAfterVoiceList(action)
+  }
+
   function releaseReadAfterVoiceList() {
     var action = root.pendingReadAfterVoiceList
     root.pendingReadAfterVoiceList = ""
@@ -691,6 +701,8 @@ Item {
 
   function applySetupProbe(raw) {
     var ready = String(raw || "").trim() === "ready"
+    var hadPendingRead = root.pendingReadAfterVoiceList !== ""
+    root.setupProbeCompleted = true
     root.setupReady = ready
     if (!ready) {
       root.status = "setup-required"
@@ -700,7 +712,14 @@ Item {
       root.status = "idle"
       root.errorCode = ""
     }
-    if (ready) root.requestVoiceList()
+    if (ready) {
+      root.requestVoiceList()
+      if (!root.voiceManagerBusy || root.voiceManagerOperation !== "list")
+        root.releaseReadAfterVoiceList()
+    } else if (hadPendingRead) {
+      root.pendingReadAfterVoiceList = ""
+      root.setupHint()
+    }
   }
 
   function protocolCommand(command) {
@@ -876,7 +895,7 @@ Item {
     // A fallback capture may still be restoring the user's clipboard. Do not
     // start another capture until that asynchronous restore has completed; an
     // old wl-copy exit would otherwise clear the new capture's state.
-    if (root.queueReadAfterVoiceList("selection")) return
+    if (root.queueReadUntilReady("selection")) return
     if (root.captureStage === "restore" || root.stopPending || root.ocrBusy || root.bridgeBusy
         || root.voiceManagerBusy || root.voiceManagerCancelPending) return
     if (root.setupRequired) {
@@ -901,11 +920,11 @@ Item {
   }
 
   function readOcr() {
+    if (root.queueReadUntilReady("ocr")) return "queued"
     if (root.setupRequired) {
       root.setupHint()
       return "unavailable"
     }
-    if (root.queueReadAfterVoiceList("ocr")) return "queued"
     // OCR capture is intentionally independent of CLIPBOARD and cannot
     // interrupt a selection, another OCR capture, playback, or a Codex alert.
     if (root.active || root.captureStage !== "idle" || root.stopPending || root.ocrCancelPending || root.bridgeCancelPending || ocrProc.running) return "busy"
@@ -962,6 +981,7 @@ Item {
     root.cancelVoiceManager()
     root.cancelCapture(true)
     root.pendingWorkerCommands = []
+    root.pendingReadAfterVoiceList = ""
     root.stopPending = workerProc.running
     if (root.stopPending) root.writeWorkerCommand({ command: "stop" })
     root.characterCount = 0
