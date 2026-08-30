@@ -23,6 +23,8 @@ IDs, labels, region/quality, approximate size, installation state, and official
 links. It never returns model bytes, selected text, arbitrary paths, or
 arbitrary URLs. Setup installs and selects only the catalog default; alternate
 voices are downloaded only after an explicit popup action.
+Selecting an uninstalled catalog entry performs the verified install and then
+selects it automatically; no model path or URL comes from the QML caller.
 
 The protocol version is the integer `1`. A request may omit `protocolVersion`
 for compatibility with the original worker; omission means v1. If a request
@@ -110,6 +112,9 @@ not attributed to the stopped request.
 
 The optional `audioStarted: true` field is metadata only and marks the first
 audio output. It contains no audio or text.
+The production PipeWire sink prepends 160 ms of zero-valued PCM to each fresh
+`pw-play` stream. This device wake-up guard is not synthesized speech and does
+not alter the selected text or backend protocol.
 
 ## Lifecycle and cancellation
 

@@ -14,7 +14,7 @@ BarWidget {
   readonly property bool active: state === "capturing" || state === "loading" || state === "speaking" || state === "stopping"
     || (readAloud && (Boolean(readAloud.ocrBusy) || Boolean(readAloud.bridgeBusy)
       || Boolean(readAloud.ocrCancelPending) || Boolean(readAloud.bridgeCancelPending)
-      || Boolean(readAloud.voiceManagerBusy) || Boolean(readAloud.voiceManagerCancelPending)))
+      || Boolean(readAloud.voiceManagerMutating)))
   readonly property bool voiceActionsBusy: readAloud && readAloud.voiceActionsBusy
   readonly property string voiceName: readAloud ? String(readAloud.voiceName || "en_US-lessac-medium") : "en_US-lessac-medium"
   readonly property var voiceCatalog: readAloud ? (readAloud.voiceCatalog || []) : []
@@ -23,15 +23,28 @@ BarWidget {
   readonly property int characterCount: readAloud ? Number(readAloud.characterCount || 0) : 0
   readonly property var speedPresets: [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
   readonly property var cleanupProfiles: ["off", "safe", "article"]
+  readonly property var voiceOptions: {
+    var options = []
+    for (var index = 0; index < root.voiceCatalog.length; index++) {
+      var item = root.voiceCatalog[index]
+      if (!item || !item.id) continue
+      var label = item.label + " · " + item.region + " · " + item.quality
+      if (!item.installed) label += " · ~" + (Number(item.sizeBytes) / 1000000).toFixed(1) + " MB download"
+      options.push({ value: item.id, label: label })
+    }
+    return options
+  }
   property bool popupOpen: false
 
   readonly property string iconText: {
     if (state === "setup-required") return "󰒓"
     if (state === "capturing" || state === "loading") return "󰔟"
-    if (state === "speaking") return "󰍬"
+    if (state === "speaking") return ""
     if (state === "stopping") return "󰅖"
     if (state === "error") return "󰀦"
-    return "󰗇"
+    // Match Omarchy's native volume OSD instead of the previous playlist
+    // glyph, which did not communicate speech or audio.
+    return ""
   }
 
   readonly property string statusLabel: {
@@ -51,6 +64,11 @@ BarWidget {
     if (state === "setup-required") return Color.muted
     if (active) return Color.accent
     return bar ? bar.barForeground : Color.foreground
+  }
+
+  readonly property string iconTooltip: {
+    var action = root.active ? "Left-click: stop current action" : "Left-click: read selected text"
+    return "OmaYap — " + root.statusLabel + "\n" + action + "\nRight-click: open settings"
   }
 
   readonly property bool opened: popupOpen
@@ -108,6 +126,12 @@ BarWidget {
     return "Cleans spacing and controls while preserving language marks."
   }
 
+  function cleanupProfileTooltip(value) {
+    if (value === "off") return "Minimal cleanup\nNormalizes line endings only."
+    if (value === "article") return "Article cleanup\nAlso removes conservative citation markers."
+    return "Natural reading (recommended)\nCleans spacing and control characters."
+  }
+
   function setCleanupProfile(value) {
     if (root.readAloud && root.readAloud.setCleanupProfile)
       root.readAloud.setCleanupProfile(value)
@@ -118,16 +142,24 @@ BarWidget {
       root.readAloud.readOcr()
   }
 
-  function voiceSizeLabel(bytes) {
-    var size = Number(bytes)
-    if (!isFinite(size) || size <= 0) return "Download"
-    return "Download ~" + (size / 1000000).toFixed(1) + " MB"
-  }
-
   function useVoice(item) {
-    if (!item || !root.readAloud || root.active || root.voiceActionsBusy) return
+    if (!item || item.selected || !root.readAloud || root.active || root.voiceActionsBusy) return
     if (item.installed) root.readAloud.selectVoice(item.id)
     else root.readAloud.installVoice(item.id)
+  }
+
+  function chooseVoice(id) {
+    // Keep showing the active voice while an install/select operation runs.
+    // The service updates voiceName only after the fixed catalog manager has
+    // verified and atomically selected the requested files.
+    voiceDropdown.value = root.voiceName
+    for (var index = 0; index < root.voiceCatalog.length; index++) {
+      var item = root.voiceCatalog[index]
+      if (item && item.id === id) {
+        root.useVoice(item)
+        return
+      }
+    }
   }
 
   function presetSelected(value) {
@@ -142,6 +174,7 @@ BarWidget {
   }
 
   onSpeedChanged: if (speedValue && !speedValue.activeFocus) speedValue.text = root.formatSpeed(root.speed)
+  onVoiceNameChanged: if (voiceDropdown) voiceDropdown.value = root.voiceName
 
   function clickAction() {
     if (readAloud) readAloud.toggleSelection()
@@ -158,7 +191,7 @@ BarWidget {
     active: root.active || root.popupOpen
     foreground: root.stateColor
     useActiveColor: false
-    tooltipText: root.state === "stopping" ? "Stopping OmaYap" : (root.active ? "Stop OmaYap" : "Read selected text aloud")
+    tooltipText: root.iconTooltip
     horizontalMargin: 7.5
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.RightButton) root.toggle()
@@ -218,79 +251,17 @@ BarWidget {
         }
       }
 
-      Text {
-        text: "Voice: " + root.voiceName
-        color: root.bar ? root.bar.foreground : Color.foreground
-        font.family: root.bar ? root.bar.fontFamily : Style.font.family
-        font.pixelSize: Style.font.bodySmall
+      Dropdown {
+        id: voiceDropdown
         width: parent.width
-        elide: Text.ElideRight
-      }
-
-      Column {
-        id: voiceControls
-        width: parent.width
-        spacing: Style.space(4)
-
-        Text {
-          text: "Voices"
-          color: root.bar ? root.bar.foreground : Color.foreground
-          font.family: root.bar ? root.bar.fontFamily : Style.font.family
-          font.pixelSize: Style.font.bodySmall
-        }
-
-        Repeater {
-          model: root.voiceCatalog
-          delegate: Row {
-            required property var modelData
-            width: voiceControls.width
-            spacing: Style.space(6)
-            height: Style.spacing.controlHeight
-
-            Column {
-              width: parent.width - voiceAction.implicitWidth - Style.space(6)
-              anchors.verticalCenter: parent.verticalCenter
-              spacing: 0
-
-              Text {
-                text: modelData.label + " · " + modelData.region + " · " + modelData.quality
-                color: root.bar ? root.bar.foreground : Color.foreground
-                font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                font.pixelSize: Style.font.caption
-                width: parent.width
-                elide: Text.ElideRight
-              }
-
-              Text {
-                text: modelData.id
-                color: Color.muted
-                font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                font.pixelSize: Style.font.caption
-                width: parent.width
-                elide: Text.ElideRight
-              }
-            }
-
-            Button {
-              id: voiceAction
-              anchors.verticalCenter: parent.verticalCenter
-              text: modelData.selected ? "Selected" : (modelData.installed ? "Use" : root.voiceSizeLabel(modelData.sizeBytes))
-              foreground: modelData.selected
-                ? (root.bar ? root.bar.barForeground : Color.accent)
-                : (root.bar ? root.bar.foreground : Color.foreground)
-              accent: root.bar ? root.bar.barForeground : Color.accent
-              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-              fontSize: Style.font.caption
-              horizontalPadding: Style.space(6)
-              verticalPadding: Style.space(2)
-              enabled: !root.active && !root.voiceActionsBusy && !modelData.selected
-              tooltipText: modelData.selected
-                ? "Currently selected voice"
-                : (modelData.installed ? "Use " + modelData.id : root.voiceSizeLabel(modelData.sizeBytes))
-              onClicked: root.useVoice(modelData)
-            }
-          }
-        }
+        label: "Voice"
+        value: root.voiceName
+        options: root.voiceOptions
+        foreground: root.bar ? root.bar.foreground : Color.foreground
+        accent: root.bar ? root.bar.barForeground : Color.accent
+        fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+        enabled: !root.active && !root.voiceActionsBusy && root.voiceOptions.length > 0
+        onChanged: function(value) { root.chooseVoice(value) }
       }
 
       Column {
@@ -448,7 +419,7 @@ BarWidget {
                 : (root.bar ? root.bar.foreground : Color.foreground)
               accent: root.bar ? root.bar.barForeground : Color.accent
               selected: root.cleanupProfile === modelData
-              tooltipText: root.cleanupProfileDescription(modelData)
+              tooltipText: root.cleanupProfileTooltip(modelData)
               onClicked: root.setCleanupProfile(modelData)
             }
           }
@@ -472,7 +443,7 @@ BarWidget {
         fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
         fontSize: Style.font.bodySmall
         enabled: !root.active
-        tooltipText: "Select a screen region and read its text aloud without changing the clipboard."
+        tooltipText: "Select a screen region\nRead recognized text aloud\nClipboard stays unchanged"
         onClicked: root.readOcr()
       }
 
@@ -507,14 +478,6 @@ BarWidget {
         wrapMode: Text.WordWrap
       }
 
-      Text {
-        text: "Left-click: read or stop · Right-click: this panel"
-        color: Color.muted
-        font.family: root.bar ? root.bar.fontFamily : Style.font.family
-        font.pixelSize: Style.font.caption
-        width: parent.width
-        wrapMode: Text.WordWrap
-      }
     }
   }
 }
