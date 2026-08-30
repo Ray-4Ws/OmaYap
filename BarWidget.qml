@@ -39,12 +39,13 @@ BarWidget {
   readonly property string iconText: {
     if (state === "setup-required") return "󰒓"
     if (state === "capturing" || state === "loading") return "󰔟"
-    if (state === "speaking") return ""
+    if (state === "speaking") return "󰗋"
     if (state === "stopping") return "󰅖"
     if (state === "error") return "󰀦"
-    // Match Omarchy's native volume OSD instead of the previous playlist
-    // glyph, which did not communicate speech or audio.
-    return ""
+    // Material Design's account-voice glyph is a person speaking with sound
+    // waves: the requested no-prohibition form, without duplicating Omarchy's
+    // separate system-volume icon.
+    return "󰗋"
   }
 
   readonly property string statusLabel: {

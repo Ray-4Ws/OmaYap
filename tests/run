@@ -18,7 +18,7 @@ grep -Fqx -- 'PLUGIN_VERSION="1.5.0"' "$ROOT/bin/setup"
 grep -Fq -- 'property bool stopPending: false' "$ROOT/Service.qml"
 grep -Fq -- 'status === "stopping"' "$ROOT/Service.qml"
 [[ "$(grep -Fc -- 'if (root.stopPending) return' "$ROOT/Service.qml")" -eq 2 ]]
-grep -Fq -- 'return ""' "$ROOT/BarWidget.qml"
+grep -Fq -- 'return "󰗋"' "$ROOT/BarWidget.qml"
 grep -Fq -- 'readonly property string iconTooltip' "$ROOT/BarWidget.qml"
 grep -Fq -- 'Right-click: open settings' "$ROOT/BarWidget.qml"
 grep -Fq -- 'step: 0.25' "$ROOT/BarWidget.qml"
