@@ -12,6 +12,18 @@ newline, on stdin. Responses are UTF-8 JSON objects, one object per newline, on
 stdout. A backend must not write diagnostics to stdout; stderr is not consumed
 by the service and must not contain selected text.
 
+Voice selection is intentionally outside this speech protocol. The service
+invokes the dependency-free `bin/manage-voices` helper for `list`, `install`,
+and `select`; that helper accepts only IDs from the immutable
+[`share/voices.json`](../share/voices.json) catalog. It downloads only the
+catalog's fixed HTTPS Piper files, checks exact byte counts and SHA-256 values,
+and writes only the private `XDG_DATA_HOME/omayap-read-aloud/models/` tree plus
+the atomic `selected-voice` state. `list --json` returns bounded metadata only:
+IDs, labels, region/quality, approximate size, installation state, and official
+links. It never returns model bytes, selected text, arbitrary paths, or
+arbitrary URLs. Setup installs and selects only the catalog default; alternate
+voices are downloaded only after an explicit popup action.
+
 The protocol version is the integer `1`. A request may omit `protocolVersion`
 for compatibility with the original worker; omission means v1. If a request
 contains another value, the backend emits one metadata-only state event with

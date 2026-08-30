@@ -1,0 +1,435 @@
+#!/usr/bin/env python3
+"""Install and select the four checked-in OmaYap Piper voices.
+
+This command intentionally has no third-party dependencies.  The catalog is
+the authority for every URL, filename, size, and digest; callers can provide
+an ID only.  OMAYAP_TEST_MODE with OMAYAP_TEST_SOURCE_DIR is a test-only
+fixture transport and is rejected unless the explicit test gate is enabled.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import signal
+import stat
+import sys
+from typing import Any, BinaryIO
+from urllib.parse import urlsplit
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+
+SCHEMA_VERSION = 1
+MAX_CATALOG_BYTES = 64 * 1024
+MAX_OUTPUT_BYTES = 32 * 1024
+CHUNK_SIZE = 1024 * 1024
+ID_RE = re.compile(r"^[a-z]{2}_[A-Z]{2}-[a-z0-9]+-medium$")
+DEFAULT_ID = "en_US-lessac-medium"
+EXIT_USAGE = 2
+EXIT_FAILURE = 1
+
+
+class VoiceError(Exception):
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+def fail(code: str) -> None:
+    raise VoiceError(code)
+
+
+def cancel_signal(_signum: int, _frame: Any) -> None:
+    # Raising on the main thread lets download_one remove its same-directory
+    # stage before the bounded manager process exits. No user text is ever
+    # involved in this fixed cancellation path.
+    raise VoiceError("cancelled")
+
+
+signal.signal(signal.SIGTERM, cancel_signal)
+signal.signal(signal.SIGINT, cancel_signal)
+
+
+def load_catalog() -> dict[str, Any]:
+    path = Path(__file__).resolve().parent.parent / "share" / "voices.json"
+    try:
+        raw = path.read_bytes()
+        if len(raw) > MAX_CATALOG_BYTES:
+            fail("catalog-invalid")
+        catalog = json.loads(raw.decode("utf-8"))
+    except VoiceError:
+        raise
+    except Exception:
+        fail("catalog-invalid")
+    if not isinstance(catalog, dict) or catalog.get("schemaVersion") != SCHEMA_VERSION:
+        fail("catalog-invalid")
+    voices = catalog.get("voices")
+    if not isinstance(voices, list) or len(voices) != 4:
+        fail("catalog-invalid")
+    seen: set[str] = set()
+    for voice in voices:
+        if not isinstance(voice, dict):
+            fail("catalog-invalid")
+        voice_id = voice.get("id")
+        if not isinstance(voice_id, str) or not ID_RE.fullmatch(voice_id) or voice_id in seen:
+            fail("catalog-invalid")
+        seen.add(voice_id)
+        for key in ("modelUrl", "configUrl", "cardDownloadUrl", "modelCardUrl"):
+            if not isinstance(voice.get(key), str) or not voice[key].startswith("https://"):
+                fail("catalog-invalid")
+            if key != "modelCardUrl" and not voice[key].startswith("https://huggingface.co/rhasspy/piper-voices/"):
+                fail("catalog-invalid")
+        for key in ("modelSha256", "configSha256", "cardSha256"):
+            if not isinstance(voice.get(key), str) or not re.fullmatch(r"[0-9a-f]{64}", voice[key]):
+                fail("catalog-invalid")
+        for key in ("sizeBytes", "configSizeBytes", "cardSizeBytes"):
+            if type(voice.get(key)) is not int or voice[key] <= 0:
+                fail("catalog-invalid")
+    if catalog.get("defaultVoice") != DEFAULT_ID or DEFAULT_ID not in seen:
+        fail("catalog-invalid")
+    return catalog
+
+
+def data_root() -> Path:
+    data_home = os.environ.get("XDG_DATA_HOME") or os.path.join(os.environ.get("HOME", ""), ".local", "share")
+    if not data_home or "\x00" in data_home or "\n" in data_home:
+        fail("unsafe-data-home")
+    base = Path(data_home)
+    if not base.is_absolute() or base == Path("/"):
+        fail("unsafe-data-home")
+    return base / "omayap-read-aloud"
+
+
+def reject_symlink(path: Path, *, directory: bool = False) -> None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(info.st_mode):
+        fail("symlink-refused")
+    if directory and not stat.S_ISDIR(info.st_mode):
+        fail("unsafe-path")
+    if not directory and not stat.S_ISREG(info.st_mode):
+        fail("unsafe-path")
+
+
+def ensure_private_tree() -> tuple[Path, Path]:
+    base = Path(os.environ.get("XDG_DATA_HOME") or os.path.join(os.environ.get("HOME", ""), ".local", "share"))
+    if not base.is_absolute() or base == Path("/"):
+        fail("unsafe-data-home")
+    reject_symlink(base, directory=True)
+    root = data_root()
+    reject_symlink(root, directory=True)
+    root.mkdir(parents=True, exist_ok=True)
+    os.chmod(root, 0o700)
+    models = root / "models"
+    reject_symlink(models, directory=True)
+    models.mkdir(exist_ok=True)
+    os.chmod(models, 0o700)
+    return root, models
+
+
+def paths(models: Path, voice: dict[str, Any]) -> dict[str, Path]:
+    voice_id = voice["id"]
+    return {
+        "model": models / f"{voice_id}.onnx",
+        "config": models / f"{voice_id}.onnx.json",
+        "card": models / f"{voice_id}.MODEL_CARD",
+    }
+
+
+def expected(voice: dict[str, Any], kind: str) -> tuple[int, str]:
+    return {
+        "model": (voice["sizeBytes"], voice["modelSha256"]),
+        "config": (voice["configSizeBytes"], voice["configSha256"]),
+        "card": (voice["cardSizeBytes"], voice["cardSha256"]),
+    }[kind]
+
+
+def fixture_path(voice_id: str, kind: str) -> Path | None:
+    if os.environ.get("OMAYAP_TEST_MODE") != "1":
+        return None
+    source = os.environ.get("OMAYAP_TEST_SOURCE_DIR")
+    if not source or "\x00" in source or "\n" in source:
+        return None
+    suffix = {"model": ".onnx", "config": ".onnx.json", "card": ".MODEL_CARD"}[kind]
+    return Path(source) / f"{voice_id}{suffix}"
+
+
+def fixture_expected(voice: dict[str, Any], kind: str, source: Path | None) -> tuple[int, str]:
+    """Derive test fixture metadata only behind the test gate.
+
+    Production always uses checked-in sizes and hashes.  Test fixtures are
+    intentionally small and therefore cannot pretend to be production model
+    bytes; list uses this same test-only expectation to verify the copy.
+    """
+    if source is None:
+        return expected(voice, kind)
+    reject_symlink(source)
+    try:
+        size = source.stat().st_size
+        if size <= 0:
+            fail("fixture-invalid")
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    except VoiceError:
+        raise
+    except Exception:
+        fail("fixture-invalid")
+    return size, digest
+
+
+def verify_file(path: Path, size: int, digest: str) -> bool:
+    try:
+        reject_symlink(path)
+        if path.stat().st_size != size:
+            return False
+        hasher = hashlib.sha256()
+        with path.open("rb") as stream:
+            total = 0
+            while True:
+                block = stream.read(CHUNK_SIZE)
+                if not block:
+                    break
+                total += len(block)
+                if total > size:
+                    return False
+                hasher.update(block)
+        return total == size and secrets.compare_digest(hasher.hexdigest(), digest)
+    except VoiceError:
+        raise
+    except (OSError, ValueError):
+        return False
+
+
+def verified_installed(models: Path, voice: dict[str, Any]) -> bool:
+    for kind, path in paths(models, voice).items():
+        fixture = fixture_path(voice["id"], kind)
+        size, digest = fixture_expected(voice, kind, fixture)
+        if not verify_file(path, size, digest):
+            return False
+    return True
+
+
+def source_stream(source: Path) -> BinaryIO:
+    reject_symlink(source)
+    try:
+        return source.open("rb")
+    except OSError:
+        fail("download-failed")
+
+
+def network_stream(url: str, expected_size: int) -> BinaryIO:
+    if not url.startswith("https://huggingface.co/rhasspy/piper-voices/"):
+        fail("catalog-invalid")
+    try:
+        request = Request(url, headers={"User-Agent": "OmaYap/1.4.0"})
+        response = urlopen(request, timeout=30)  # nosec B310: catalog URLs are fixed and HTTPS-only
+        final_url = response.geturl()
+        if not valid_response_url(final_url):
+            response.close()
+            fail("unsafe-redirect")
+        content_length = response.headers.get("Content-Length")
+        if content_length is not None:
+            try:
+                if int(content_length) != expected_size:
+                    response.close()
+                    fail("content-length-mismatch")
+            except (TypeError, ValueError):
+                response.close()
+                fail("content-length-invalid")
+        return response
+    except (HTTPError, URLError, OSError, ValueError):
+        fail("download-failed")
+
+
+def valid_response_url(value: Any) -> bool:
+    """Allow the fixed Hugging Face origin and its official HTTPS CDNs."""
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = urlsplit(value)
+        host = (parsed.hostname or "").lower()
+    except ValueError:
+        return False
+    return parsed.scheme == "https" and (
+        host == "huggingface.co"
+        or host.endswith(".huggingface.co")
+        or host == "hf.co"
+        or host.endswith(".hf.co")
+    )
+
+
+def download_one(source: Path | None, url: str, target: Path, size: int, digest: str) -> None:
+    reject_symlink(target)
+    stage = target.with_name(f".{target.name}.part.{os.getpid()}.{secrets.token_hex(6)}")
+    reject_symlink(stage)
+    hasher = hashlib.sha256()
+    total = 0
+    try:
+        stream = source_stream(source) if source is not None else network_stream(url, size)
+        with stream:
+            with stage.open("xb") as output:
+                while True:
+                    block = stream.read(min(CHUNK_SIZE, size + 1 - total))
+                    if not block:
+                        break
+                    total += len(block)
+                    if total > size:
+                        fail("download-oversize")
+                    hasher.update(block)
+                    output.write(block)
+                output.flush()
+                os.fsync(output.fileno())
+        if total != size:
+            fail("download-truncated")
+        if not secrets.compare_digest(hasher.hexdigest(), digest):
+            fail("checksum-mismatch")
+        os.chmod(stage, 0o600)
+        reject_symlink(target)
+        os.replace(stage, target)
+        os.chmod(target, 0o600)
+    except VoiceError:
+        try:
+            stage.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    except (OSError, ValueError):
+        try:
+            stage.unlink()
+        except FileNotFoundError:
+            pass
+        fail("download-failed")
+
+
+def atomic_write(path: Path, content: bytes) -> None:
+    reject_symlink(path)
+    stage = path.with_name(f".{path.name}.part.{os.getpid()}.{secrets.token_hex(6)}")
+    try:
+        with stage.open("xb") as output:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(stage, 0o600)
+        reject_symlink(path)
+        os.replace(stage, path)
+        os.chmod(path, 0o600)
+    except VoiceError:
+        try:
+            stage.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    except OSError:
+        try:
+            stage.unlink()
+        except FileNotFoundError:
+            pass
+        fail("state-write-failed")
+
+
+def selected_id(root: Path, models: Path, catalog: dict[str, Any]) -> str:
+    state = root / "selected-voice"
+    reject_symlink(state)
+    selected = ""
+    try:
+        if state.exists():
+            selected = state.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError):
+        selected = ""
+    by_id = {voice["id"]: voice for voice in catalog["voices"]}
+    if selected in by_id and verified_installed(models, by_id[selected]):
+        return selected
+    default = catalog["defaultVoice"]
+    if verified_installed(models, by_id[default]):
+        return default
+    return ""
+
+
+def metadata(catalog: dict[str, Any], models: Path, root: Path) -> dict[str, Any]:
+    chosen = selected_id(root, models, catalog)
+    result: list[dict[str, Any]] = []
+    for voice in catalog["voices"]:
+        installed = verified_installed(models, voice)
+        result.append({
+            "id": voice["id"],
+            "label": voice["label"],
+            "language": voice["language"],
+            "region": voice["region"],
+            "quality": voice["quality"],
+            "sizeBytes": voice["sizeBytes"],
+            "modelCardUrl": voice["modelCardUrl"],
+            "termsLabel": voice["termsLabel"],
+            "termsUrl": voice["termsUrl"],
+            "installed": installed,
+            "selected": installed and voice["id"] == chosen,
+        })
+    return {"schemaVersion": SCHEMA_VERSION, "defaultVoice": catalog["defaultVoice"], "selectedVoice": chosen, "voices": result}
+
+
+def install(catalog: dict[str, Any], voice_id: str) -> None:
+    if not isinstance(voice_id, str) or voice_id not in {v["id"] for v in catalog["voices"]}:
+        fail("invalid-id")
+    root, models = ensure_private_tree()
+    voice = next(v for v in catalog["voices"] if v["id"] == voice_id)
+    for kind, target in paths(models, voice).items():
+        fixture = fixture_path(voice_id, kind)
+        size, digest = fixture_expected(voice, kind, fixture)
+        if verify_file(target, size, digest):
+            continue
+        download_one(fixture, voice[{"model": "modelUrl", "config": "configUrl", "card": "cardDownloadUrl"}[kind]], target, size, digest)
+
+
+def select(catalog: dict[str, Any], voice_id: str) -> None:
+    if not isinstance(voice_id, str) or voice_id not in {v["id"] for v in catalog["voices"]}:
+        fail("invalid-id")
+    root, models = ensure_private_tree()
+    voice = next(v for v in catalog["voices"] if v["id"] == voice_id)
+    if not verified_installed(models, voice):
+        fail("voice-not-installed")
+    atomic_write(root / "selected-voice", (voice_id + "\n").encode("ascii"))
+
+
+def emit(payload: dict[str, Any]) -> None:
+    raw = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    if len(raw.encode("utf-8")) > MAX_OUTPUT_BYTES:
+        raise VoiceError("output-too-large")
+    sys.stdout.write(raw + "\n")
+
+
+def main(argv: list[str]) -> int:
+    try:
+        catalog = load_catalog()
+        if not argv or argv[0] in {"-h", "--help"}:
+            emit({"ok": True, "usage": "list|install ID|select ID"})
+            return 0 if argv else EXIT_USAGE
+        command = argv[0]
+        if command == "list" and len(argv) in {1, 2} and (len(argv) == 1 or argv[1] == "--json"):
+            root, models = ensure_private_tree()
+            emit(metadata(catalog, models, root))
+            return 0
+        if command in {"install", "select"} and len(argv) == 2:
+            if command == "install":
+                install(catalog, argv[1])
+                emit({"ok": True, "command": "install", "voice": argv[1]})
+            else:
+                select(catalog, argv[1])
+                emit({"ok": True, "command": "select", "voice": argv[1]})
+            return 0
+        emit({"ok": False, "errorCode": "invalid-command"})
+        return EXIT_USAGE
+    except VoiceError as error:
+        emit({"ok": False, "errorCode": error.code})
+        return EXIT_FAILURE
+    except Exception:
+        # Never leak paths, URLs, exception text, or model content.
+        emit({"ok": False, "errorCode": "manager-failed"})
+        return EXIT_FAILURE
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

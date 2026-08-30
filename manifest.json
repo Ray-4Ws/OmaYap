@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "omayap.read-aloud",
   "name": "OmaYap",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "author": "Ray-4Ws",
   "license": "MIT",
-  "description": "Read selected or locally captured screen text aloud with Piper neural TTS.",
+  "description": "Read selected or locally captured screen text aloud with local Piper voices.",
   "kinds": [
     "service",
     "bar-widget"
@@ -17,7 +17,7 @@
   },
   "barWidget": {
     "displayName": "OmaYap",
-    "description": "Read selection or local screen OCR, or stop playback; right-click for speed, cleanup, and status.",
+    "description": "Read selection or local screen OCR, or stop playback; right-click for local voices, speed, cleanup, and status.",
     "category": "Accessibility",
     "defaultSection": "right",
     "allowMultiple": false
