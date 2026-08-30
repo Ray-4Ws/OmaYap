@@ -10,9 +10,9 @@ grep -Fqx -- '    "displayName": "OmaYap",' "$ROOT/manifest.json"
 grep -Fqx -- '# OmaYap' "$ROOT/README.md"
 grep -Fq -- '`OmaYap` is an Omarchy shell plugin' "$ROOT/README.md"
 grep -Fq -- 'https://github.com/Ray-4Ws/OmaYap' "$ROOT/README.md"
-grep -Fqx -- '  "version": "1.3.0",' "$ROOT/manifest.json"
-grep -Fqx -- '  readonly property string pluginVersion: "1.3.0"' "$ROOT/Service.qml"
-grep -Fqx -- 'PLUGIN_VERSION="1.3.0"' "$ROOT/bin/setup"
+grep -Fqx -- '  "version": "1.4.0",' "$ROOT/manifest.json"
+grep -Fqx -- '  readonly property string pluginVersion: "1.4.0"' "$ROOT/Service.qml"
+grep -Fqx -- 'PLUGIN_VERSION="1.4.0"' "$ROOT/bin/setup"
 ! rg -n -F 'Read aloud setup required' "$ROOT/Service.qml" "$ROOT/BarWidget.qml"
 ! rg -n -F 'Read aloud error' "$ROOT/Service.qml" "$ROOT/BarWidget.qml"
 grep -Fq -- 'property bool stopPending: false' "$ROOT/Service.qml"
@@ -84,6 +84,20 @@ grep -Fq -- 'cleanupProfiles: ["off", "safe", "article"]' "$ROOT/BarWidget.qml"
 grep -Fq -- 'function setCleanupProfile(value)' "$ROOT/BarWidget.qml"
 grep -Fq -- 'protocolCommand(command)' "$ROOT/Service.qml"
 grep -Fq -- 'validWorkerEvent(parsed)' "$ROOT/Service.qml"
+test -x "$ROOT/bin/manage-voices"
+test -f "$ROOT/share/voices.json"
+grep -Fq -- 'schemaVersion' "$ROOT/share/voices.json"
+grep -Fq -- 'cardDownloadUrl' "$ROOT/share/voices.json"
+grep -Fq -- 'function requestVoiceList()' "$ROOT/Service.qml"
+grep -Fq -- 'function installVoice(id)' "$ROOT/Service.qml"
+grep -Fq -- 'function selectVoice(id)' "$ROOT/Service.qml"
+grep -Fq -- 'function finishCancelledVoiceManager()' "$ROOT/Service.qml"
+grep -Fq -- 'voiceManagerCancelPending' "$ROOT/Service.qml"
+grep -Fq -- 'readonly property bool voiceActionsBusy' "$ROOT/Service.qml"
+grep -Fq -- 'var failedCode = "manager-failed"' "$ROOT/Service.qml"
+! sed -n '/readonly property bool active:/p' "$ROOT/Service.qml" | grep -Fq -- 'expectedWorkerExit'
+grep -Fq -- 'text: modelData.selected ? "Selected"' "$ROOT/BarWidget.qml"
+grep -Fq -- 'voiceSizeLabel(modelData.sizeBytes)' "$ROOT/BarWidget.qml"
 test -f "$ROOT/docs/backend-protocol.md"
 grep -Fq -- 'backend protocol v1' "$ROOT/docs/backend-protocol.md"
 grep -Fq -- 'cleanupProfile' "$ROOT/docs/backend-protocol.md"
@@ -130,6 +144,7 @@ grep -Fq -- 'docs/memory-benchmark-results.md' "$ROOT/README.md"
 
 python3 -m unittest -v tests.test_worker
 python3 -m unittest -v tests.test_integrations
+python3 -m unittest -v tests.test_voice_manager
 
 if command -v omarchy >/dev/null 2>&1; then
   (cd "$ROOT" && omarchy plugin validate .)
@@ -272,7 +287,20 @@ grep -Fqx -- '-- END OMAYAP_READ_ALOUD_F10' "$config/hypr/bindings.lua"
 [[ "$(grep -Fc 'omayap.read-aloud readOcr' "$config/hypr/bindings.lua")" == 1 ]]
 grep -Fqx -- 'o.bind("CTRL + F10", "Read screen text aloud (OCR)", "omarchy-shell omayap.read-aloud readOcr")' "$config/hypr/bindings.lua"
 [[ -f "$data/omayap-read-aloud/runtime-version" ]]
-rg -Fq 'PLUGIN_VERSION=$4' "$ROOT/Service.qml"
+[[ -f "$data/omayap-read-aloud/models/en_US-lessac-medium.MODEL_CARD" ]]
+[[ -f "$data/omayap-read-aloud/selected-voice" ]]
+if find "$data/omayap-read-aloud/models" -maxdepth 1 -type f -name 'en_US-kristin-medium*' -print -quit | grep -q .; then exit 1; fi
+if find "$data/omayap-read-aloud/models" -maxdepth 1 -type f -name 'en_US-john-medium*' -print -quit | grep -q .; then exit 1; fi
+if find "$data/omayap-read-aloud/models" -maxdepth 1 -type f -name 'en_GB-alba-medium*' -print -quit | grep -q .; then exit 1; fi
+rg -Fq 'PLUGIN_VERSION=$5' "$ROOT/Service.qml"
+
+OMAYAP_TEST_MODE=1 OMAYAP_TEST_SOURCE_DIR="$data/omayap-read-aloud/test-fixtures" \
+  python3 "$ROOT/bin/manage-voices" install en_US-kristin-medium >/dev/null
+OMAYAP_TEST_MODE=1 OMAYAP_TEST_SOURCE_DIR="$data/omayap-read-aloud/test-fixtures" \
+  python3 "$ROOT/bin/manage-voices" select en_US-kristin-medium >/dev/null
+run_setup
+grep -Fqx -- 'en_US-kristin-medium' "$data/omayap-read-aloud/selected-voice"
+[[ -f "$data/omayap-read-aloud/models/en_US-kristin-medium.onnx" ]]
 
 printf '%s\n' 'F10 Read selected text aloud' >"$FAKE_EFFECTIVE"
 printf '%s\n' '[{"key":"F10","dispatcher":"__lua","arg":"270","description":"Read selected text aloud"}]' >"$FAKE_BINDS"

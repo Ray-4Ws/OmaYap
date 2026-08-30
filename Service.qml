@@ -12,10 +12,15 @@ Item {
   property string omarchyPath: ""
 
   readonly property string pluginId: "omayap.read-aloud"
-  readonly property string pluginVersion: "1.3.0"
+  readonly property string pluginVersion: "1.4.0"
   readonly property int workerProtocolVersion: 1
   readonly property int maxWorkerRequestIdChars: 128
-  readonly property string voiceName: "en_US-lessac-medium"
+  readonly property string defaultVoiceName: "en_US-lessac-medium"
+  readonly property var supportedVoiceIds: ["en_US-lessac-medium", "en_US-kristin-medium", "en_US-john-medium", "en_GB-alba-medium"]
+  // The selected ID and paths are mutable only through validated manager
+  // metadata. They are kept as explicit properties so a worker replacement
+  // observes one consistent model/config pair.
+  property string voiceName: "en_US-lessac-medium"
   readonly property int maxCharacters: 20000
   // The wrapper reads cap+1 bytes and emits no stdout on overflow.  This
   // selection cap accepts 20,001 four-byte UTF-8 code points so QML can count
@@ -31,8 +36,10 @@ Item {
   readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") || ""
   readonly property string dataRoot: dataHome + "/omayap-read-aloud"
   readonly property string settingsPath: configHome + "/omayap-read-aloud/settings.json"
-  readonly property string modelPath: dataRoot + "/models/en_US-lessac-medium.onnx"
-  readonly property string modelConfigPath: modelPath + ".json"
+  property string modelPath: dataRoot + "/models/en_US-lessac-medium.onnx"
+  property string modelConfigPath: dataRoot + "/models/en_US-lessac-medium.onnx.json"
+  property string modelCardPath: dataRoot + "/models/en_US-lessac-medium.MODEL_CARD"
+  readonly property string voiceManagerPath: pluginRoot + "/bin/manage-voices"
   readonly property string runtimeStampPath: dataRoot + "/runtime-version"
   readonly property string pythonPath: dataRoot + "/venv/bin/python"
   readonly property string pluginRoot: {
@@ -57,6 +64,8 @@ Item {
   property bool stopPending: false
   property bool ocrBusy: false
   property bool bridgeBusy: false
+  property bool voiceManagerBusy: false
+  property bool voiceManagerCancelPending: false
   // A canceled helper may still deliver its collector/exit signals after
   // running is set false.  Keep a replacement from reusing those fields
   // until both signals have drained.
@@ -69,7 +78,8 @@ Item {
   property bool expectedWorkerExit: false
   property int requestSerial: 0
   property bool workerProtocolErrorNotified: false
-  readonly property bool active: status === "capturing" || status === "loading" || status === "speaking" || status === "stopping" || root.ocrBusy || root.bridgeBusy || root.ocrCancelPending || root.bridgeCancelPending
+  readonly property bool active: status === "capturing" || status === "loading" || status === "speaking" || status === "stopping" || root.ocrBusy || root.bridgeBusy || root.ocrCancelPending || root.bridgeCancelPending || root.voiceManagerBusy || root.voiceManagerCancelPending
+  readonly property bool voiceActionsBusy: root.voiceManagerBusy || root.voiceManagerCancelPending || root.expectedWorkerExit
 
   // Capture state is intentionally transient.  No selection is written to a
   // file or included in a process command line; it is sent only through the
@@ -141,6 +151,14 @@ Item {
   property int bridgeExitCode: -1
   property string bridgeToken: ""
   property string bridgePath: ""
+  property string voiceManagerOperation: ""
+  property string voiceManagerOutput: ""
+  property bool voiceManagerStreamFinished: false
+  property bool voiceManagerExited: false
+  property bool voiceManagerHandled: false
+  property int voiceManagerExitCode: -1
+  property var voiceCatalog: []
+  property bool voiceListRequested: false
 
   function clampSpeed(value) {
     var number = Number(value)
@@ -351,6 +369,212 @@ Item {
     root.bridgeExitCode = -1
   }
 
+  // ------------------------------------------------------ voice catalog
+
+  readonly property int voiceManagerByteCap: 32768
+
+  function validVoiceId(value) {
+    return typeof value === "string" && root.supportedVoiceIds.indexOf(value) !== -1
+  }
+
+  function voiceMetadata(id) {
+    for (var index = 0; index < root.voiceCatalog.length; index++) {
+      var item = root.voiceCatalog[index]
+      if (item && item.id === id) return item
+    }
+    return null
+  }
+
+  function setVoicePaths(id) {
+    if (!root.validVoiceId(id)) return false
+    var base = root.dataRoot + "/models/" + id
+    root.voiceName = id
+    root.modelPath = base + ".onnx"
+    root.modelConfigPath = base + ".onnx.json"
+    root.modelCardPath = base + ".MODEL_CARD"
+    return true
+  }
+
+  function validVoiceList(parsed) {
+    if (!parsed || parsed.schemaVersion !== 1 || !Array.isArray(parsed.voices)
+        || parsed.voices.length !== root.supportedVoiceIds.length
+        || !root.validVoiceId(parsed.defaultVoice)) return false
+    var seen = {}
+    for (var index = 0; index < parsed.voices.length; index++) {
+      var item = parsed.voices[index]
+      if (!item || !root.validVoiceId(item.id) || seen[item.id]
+          || typeof item.label !== "string" || typeof item.language !== "string"
+          || typeof item.region !== "string" || typeof item.quality !== "string"
+          || typeof item.sizeBytes !== "number" || !isFinite(item.sizeBytes)
+          || Math.floor(item.sizeBytes) !== item.sizeBytes || item.sizeBytes <= 0
+          || typeof item.installed !== "boolean" || typeof item.selected !== "boolean"
+          || typeof item.modelCardUrl !== "string" || !/^https:\/\//.test(item.modelCardUrl)
+          || typeof item.termsLabel !== "string" || typeof item.termsUrl !== "string"
+          || !/^https:\/\//.test(item.termsUrl)) return false
+      seen[item.id] = true
+    }
+    for (var requiredIndex = 0; requiredIndex < root.supportedVoiceIds.length; requiredIndex++)
+      if (!seen[root.supportedVoiceIds[requiredIndex]]) return false
+    if (parsed.selectedVoice !== "" && !root.validVoiceId(parsed.selectedVoice)) return false
+    return true
+  }
+
+  function applyVoiceList(raw) {
+    var parsed
+    try {
+      parsed = JSON.parse(String(raw || ""))
+    } catch (error) {
+      return false
+    }
+    if (!root.validVoiceList(parsed)) return false
+    root.voiceCatalog = parsed.voices
+    var selected = ""
+    if (parsed.selectedVoice) {
+      var selectedMeta = root.voiceMetadata(parsed.selectedVoice)
+      if (selectedMeta && selectedMeta.installed) selected = parsed.selectedVoice
+    }
+    if (!selected) {
+      var defaultMeta = root.voiceMetadata(root.defaultVoiceName)
+      if (defaultMeta && defaultMeta.installed) selected = root.defaultVoiceName
+    }
+    // The manager's fallback is deliberately mirrored here so a malformed or
+    // stale state file can never make QML pass an arbitrary model path to the
+    // worker.
+    if (!selected) selected = root.defaultVoiceName
+    var changed = selected !== root.voiceName
+    root.setVoicePaths(selected)
+    if (changed && workerProc.running && root.status === "idle" && !root.stopPending)
+      root.evictIdleWorker()
+    return true
+  }
+
+  function voiceManagerNotice(operation, code) {
+    if (operation === "install") {
+      if (code === "voice-not-installed" || code === "checksum-mismatch"
+          || code === "download-truncated" || code === "download-oversize"
+          || code === "content-length-mismatch") {
+        root.notify("OmaYap voice download failed", "The voice could not be verified. No model was selected.")
+      } else {
+        root.notify("OmaYap voice unavailable", "The voice could not be downloaded safely.")
+      }
+    } else if (operation === "select") {
+      root.notify("OmaYap voice unavailable", "The voice is not installed and was not selected.")
+    } else {
+      root.notify("OmaYap voice unavailable", "The local voice catalog could not be read safely.")
+    }
+  }
+
+  function finishCancelledVoiceManager() {
+    if (!root.voiceManagerCancelPending || !root.voiceManagerExited || !root.voiceManagerStreamFinished) return
+    root.voiceManagerCancelPending = false
+    root.voiceManagerOutput = ""
+    root.voiceManagerExitCode = -1
+    if (root.voiceManagerOperation === "list") root.voiceListRequested = false
+    root.voiceManagerOperation = ""
+  }
+
+  function finishVoiceManager() {
+    if (!root.voiceManagerBusy || !root.voiceManagerExited || !root.voiceManagerStreamFinished || root.voiceManagerHandled) return
+    root.voiceManagerHandled = true
+    var operation = root.voiceManagerOperation
+    var output = String(root.voiceManagerOutput || "")
+    var exitCode = Number(root.voiceManagerExitCode)
+    root.voiceManagerBusy = false
+    root.voiceManagerOutput = ""
+    root.voiceManagerOperation = ""
+    if (operation === "list") root.voiceListRequested = false
+    if (exitCode !== 0) {
+      var failedCode = "manager-failed"
+      try {
+        var failed = JSON.parse(output)
+        if (failed && failed.ok === false && typeof failed.errorCode === "string"
+            && /^[a-z0-9-]{1,64}$/.test(failed.errorCode)) failedCode = failed.errorCode
+      } catch (error) {
+        // Keep the fixed generic code when the manager did not return JSON.
+      }
+      root.voiceManagerNotice(operation, failedCode)
+      return
+    }
+    var parsed
+    try {
+      parsed = JSON.parse(output)
+    } catch (error) {
+      root.voiceManagerNotice(operation, "manager-protocol-invalid")
+      return
+    }
+    if (operation === "list") {
+      if (!root.applyVoiceList(output)) root.voiceManagerNotice(operation, "manager-protocol-invalid")
+      return
+    }
+    if (!parsed || parsed.ok !== true || parsed.command !== operation || !root.validVoiceId(parsed.voice)) {
+      root.voiceManagerNotice(operation, "manager-protocol-invalid")
+      return
+    }
+    if (operation === "install") {
+      root.notify("OmaYap voice ready", "The voice was downloaded and verified. Choose Use to switch voices.")
+      root.requestVoiceList()
+    } else if (operation === "select") {
+      var changed = parsed.voice !== root.voiceName
+      root.setVoicePaths(parsed.voice)
+      if (changed && workerProc.running && root.status === "idle" && !root.stopPending)
+        root.evictIdleWorker()
+      root.requestVoiceList()
+    }
+  }
+
+  function beginVoiceManager(operation, args) {
+    if (root.setupRequired || root.voiceManagerBusy || root.voiceManagerCancelPending || voiceManagerProc.running)
+      return false
+    root.voiceManagerOperation = operation
+    root.voiceManagerBusy = true
+    root.voiceManagerOutput = ""
+    root.voiceManagerStreamFinished = false
+    root.voiceManagerExited = false
+    root.voiceManagerHandled = false
+    root.voiceManagerExitCode = -1
+    // manage-voices is itself a fixed-output, bounded helper and handles
+    // SIGTERM by cleaning its current download stage before exiting. Launch it
+    // directly so cancellation cannot orphan a downloader behind a wrapper.
+    voiceManagerProc.command = [root.pythonPath, root.voiceManagerPath].concat(args || [])
+    voiceManagerProc.running = false
+    voiceManagerProc.running = true
+    return true
+  }
+
+  function requestVoiceList() {
+    if (root.voiceListRequested || root.setupRequired || root.voiceManagerBusy || root.voiceManagerCancelPending) return false
+    root.voiceListRequested = true
+    if (!root.beginVoiceManager("list", ["list", "--json"])) {
+      root.voiceListRequested = false
+      return false
+    }
+    return true
+  }
+
+  function installVoice(id) {
+    if (!root.validVoiceId(id) || root.setupRequired || root.active || root.voiceActionsBusy || root.status !== "idle") return "busy"
+    if (!root.beginVoiceManager("install", ["install", id])) return "busy"
+    return "ok"
+  }
+
+  function selectVoice(id) {
+    if (!root.validVoiceId(id) || root.setupRequired || root.active || root.voiceActionsBusy || root.status !== "idle") return "busy"
+    var item = root.voiceMetadata(id)
+    if (!item || !item.installed) return "not-installed"
+    if (!root.beginVoiceManager("select", ["select", id])) return "busy"
+    return "ok"
+  }
+
+  function cancelVoiceManager() {
+    if (!root.voiceManagerBusy) return
+    root.voiceManagerBusy = false
+    root.voiceManagerHandled = true
+    root.voiceManagerOutput = ""
+    root.voiceManagerCancelPending = !(root.voiceManagerExited && root.voiceManagerStreamFinished)
+    if (voiceManagerProc.running) voiceManagerProc.running = false
+    if (!root.voiceManagerCancelPending) root.voiceManagerOperation = ""
+  }
+
   function statusJson() {
     return JSON.stringify({
       status: root.status,
@@ -418,8 +642,8 @@ Item {
   function probeSetup() {
     setupProbe.command = [
       "bash", "-c",
-      "if [[ -f \"$0\" ]] && grep -Fqx \"PLUGIN_VERSION=$4\" \"$0\" && [[ -x \"$1\" && -f \"$2\" && -f \"$3\" ]]; then echo ready; else echo setup-required; fi",
-      root.runtimeStampPath, root.pythonPath, root.modelPath, root.modelConfigPath, root.pluginVersion
+      "if [[ -f \"$0\" ]] && grep -Fqx \"PLUGIN_VERSION=$5\" \"$0\" && [[ -x \"$1\" && -f \"$2\" && -f \"$3\" && -f \"$4\" ]]; then echo ready; else echo setup-required; fi",
+      root.runtimeStampPath, root.pythonPath, root.modelPath, root.modelConfigPath, root.modelCardPath, root.pluginVersion
     ]
     setupProbe.running = false
     setupProbe.running = true
@@ -436,6 +660,7 @@ Item {
       root.status = "idle"
       root.errorCode = ""
     }
+    if (ready) root.requestVoiceList()
   }
 
   function protocolCommand(command) {
@@ -611,7 +836,8 @@ Item {
     // A fallback capture may still be restoring the user's clipboard. Do not
     // start another capture until that asynchronous restore has completed; an
     // old wl-copy exit would otherwise clear the new capture's state.
-    if (root.captureStage === "restore" || root.stopPending || root.ocrBusy || root.bridgeBusy) return
+    if (root.captureStage === "restore" || root.stopPending || root.ocrBusy || root.bridgeBusy
+        || root.voiceManagerBusy || root.voiceManagerCancelPending) return
     if (root.setupRequired) {
       root.setupHint()
       return
@@ -691,6 +917,7 @@ Item {
     workerIdleTimer.stop()
     root.cancelOcr()
     root.cancelBridge()
+    root.cancelVoiceManager()
     root.cancelCapture(true)
     root.pendingWorkerCommands = []
     root.stopPending = workerProc.running
@@ -1128,6 +1355,25 @@ Item {
   }
 
   Process {
+    id: voiceManagerProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.voiceManagerOutput = String(text || "")
+        root.voiceManagerStreamFinished = true
+        if (root.voiceManagerCancelPending) root.finishCancelledVoiceManager()
+        else root.finishVoiceManager()
+      }
+    }
+    onExited: function(exitCode) {
+      root.voiceManagerExitCode = exitCode
+      root.voiceManagerExited = true
+      if (root.voiceManagerCancelPending) root.finishCancelledVoiceManager()
+      else root.finishVoiceManager()
+    }
+  }
+
+  Process {
     id: setupProbe
     stdout: StdioCollector {
       waitForEnd: true
@@ -1367,7 +1613,10 @@ Item {
     interval: 5000
     running: true
     repeat: true
-    onTriggered: if (root.setupRequired) root.probeSetup()
+    onTriggered: {
+      if (root.setupRequired) root.probeSetup()
+      else if (root.voiceCatalog.length !== root.supportedVoiceIds.length) root.requestVoiceList()
+    }
   }
 
   // ------------------------------------- clipboard restoration (stdin only)
@@ -1446,6 +1695,7 @@ Item {
   Component.onDestruction: {
     root.cancelOcr()
     root.cancelBridge()
+    root.cancelVoiceManager()
     root.cancelCapture(true)
     if (workerProc.running) root.writeWorkerCommand({ command: "shutdown" })
   }

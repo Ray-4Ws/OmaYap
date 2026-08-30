@@ -13,8 +13,11 @@ BarWidget {
   readonly property bool ocrBusy: readAloud ? Boolean(readAloud.ocrBusy) : false
   readonly property bool active: state === "capturing" || state === "loading" || state === "speaking" || state === "stopping"
     || (readAloud && (Boolean(readAloud.ocrBusy) || Boolean(readAloud.bridgeBusy)
-      || Boolean(readAloud.ocrCancelPending) || Boolean(readAloud.bridgeCancelPending)))
+      || Boolean(readAloud.ocrCancelPending) || Boolean(readAloud.bridgeCancelPending)
+      || Boolean(readAloud.voiceManagerBusy) || Boolean(readAloud.voiceManagerCancelPending)))
+  readonly property bool voiceActionsBusy: readAloud && readAloud.voiceActionsBusy
   readonly property string voiceName: readAloud ? String(readAloud.voiceName || "en_US-lessac-medium") : "en_US-lessac-medium"
+  readonly property var voiceCatalog: readAloud ? (readAloud.voiceCatalog || []) : []
   readonly property real speed: readAloud ? Number(readAloud.speed || 1.0) : 1.0
   readonly property string cleanupProfile: readAloud ? String(readAloud.cleanupProfile || "safe") : "safe"
   readonly property int characterCount: readAloud ? Number(readAloud.characterCount || 0) : 0
@@ -33,6 +36,8 @@ BarWidget {
 
   readonly property string statusLabel: {
     if (state === "setup-required") return "Setup required"
+    if (readAloud && Boolean(readAloud.voiceManagerBusy)) return "Updating voices"
+    if (root.voiceActionsBusy && readAloud && Boolean(readAloud.expectedWorkerExit)) return "Preparing voice"
     if (state === "capturing") return root.ocrBusy ? "Capturing screen text" : "Capturing selection"
     if (state === "loading") return "Loading voice"
     if (state === "speaking") return "Speaking"
@@ -111,6 +116,18 @@ BarWidget {
   function readOcr() {
     if (root.readAloud && root.readAloud.readOcr)
       root.readAloud.readOcr()
+  }
+
+  function voiceSizeLabel(bytes) {
+    var size = Number(bytes)
+    if (!isFinite(size) || size <= 0) return "Download"
+    return "Download ~" + (size / 1000000).toFixed(1) + " MB"
+  }
+
+  function useVoice(item) {
+    if (!item || !root.readAloud || root.active || root.voiceActionsBusy) return
+    if (item.installed) root.readAloud.selectVoice(item.id)
+    else root.readAloud.installVoice(item.id)
   }
 
   function presetSelected(value) {
@@ -208,6 +225,72 @@ BarWidget {
         font.pixelSize: Style.font.bodySmall
         width: parent.width
         elide: Text.ElideRight
+      }
+
+      Column {
+        id: voiceControls
+        width: parent.width
+        spacing: Style.space(4)
+
+        Text {
+          text: "Voices"
+          color: root.bar ? root.bar.foreground : Color.foreground
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          font.pixelSize: Style.font.bodySmall
+        }
+
+        Repeater {
+          model: root.voiceCatalog
+          delegate: Row {
+            required property var modelData
+            width: voiceControls.width
+            spacing: Style.space(6)
+            height: Style.spacing.controlHeight
+
+            Column {
+              width: parent.width - voiceAction.implicitWidth - Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: 0
+
+              Text {
+                text: modelData.label + " · " + modelData.region + " · " + modelData.quality
+                color: root.bar ? root.bar.foreground : Color.foreground
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.caption
+                width: parent.width
+                elide: Text.ElideRight
+              }
+
+              Text {
+                text: modelData.id
+                color: Color.muted
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.caption
+                width: parent.width
+                elide: Text.ElideRight
+              }
+            }
+
+            Button {
+              id: voiceAction
+              anchors.verticalCenter: parent.verticalCenter
+              text: modelData.selected ? "Selected" : (modelData.installed ? "Use" : root.voiceSizeLabel(modelData.sizeBytes))
+              foreground: modelData.selected
+                ? (root.bar ? root.bar.barForeground : Color.accent)
+                : (root.bar ? root.bar.foreground : Color.foreground)
+              accent: root.bar ? root.bar.barForeground : Color.accent
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontSize: Style.font.caption
+              horizontalPadding: Style.space(6)
+              verticalPadding: Style.space(2)
+              enabled: !root.active && !root.voiceActionsBusy && !modelData.selected
+              tooltipText: modelData.selected
+                ? "Currently selected voice"
+                : (modelData.installed ? "Use " + modelData.id : root.voiceSizeLabel(modelData.sizeBytes))
+              onClicked: root.useVoice(modelData)
+            }
+          }
+        }
       }
 
       Column {

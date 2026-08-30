@@ -2,7 +2,8 @@
 
 `OmaYap` is an Omarchy shell plugin (`omayap.read-aloud`) that reads
 the current text selection aloud across the desktop. It is local after setup:
-Piper synthesizes with the pinned `en_US-lessac-medium` voice and sends signed 16-bit PCM to
+Piper synthesizes with a selected official Piper voice (the default is
+`en_US-lessac-medium`) and sends signed 16-bit PCM to
 PipeWire's `pw-play`.
 
 The plugin is a focused service/bar-widget adaptation of
@@ -32,8 +33,9 @@ omarchy plugin add https://github.com/Ray-4Ws/OmaYap --enable
 - creates a private Python 3.13 environment under
   `~/.local/share/omayap-read-aloud/` and installs the hash-locked Piper
   runtime;
-- downloads the official voice model, JSON configuration, and model card with
-  pinned SHA-256 checksums;
+- installs only the default official voice (`en_US-lessac-medium`) through the
+  checked-in voice catalog, verifying the model, JSON configuration, and model
+  card with pinned byte counts and SHA-256 checksums;
 - runs a silent synthesis smoke test; and
 - checks both effective and user F10 and Ctrl+F10 bindings before adding its
   two tagged bindings.
@@ -44,9 +46,11 @@ tagged block, reloads Hyprland, and checks `hyprctl configerrors`. A failed
 validation rolls the bindings back. Re-running setup is safe and replaces only
 its own tagged block.
 
-The model is about 63 MB and setup needs network access. Runtime and model data
-are private (`0700` directories, `0600` files). This repository does not run
-setup during development or plugin installation.
+The default model is about 63 MB and setup needs network access. Runtime and
+model data are private (`0700` directories, `0600` files) under
+`~/.local/share/omayap-read-aloud/models/` (or the private
+`XDG_DATA_HOME` equivalent). Setup never auto-downloads alternate voices. This
+repository does not run setup during development or plugin installation.
 
 The worker is loaded on the first read and exits after 60 seconds without a
 reading. The QML service and bar stay loaded, so this releases Piper and
@@ -58,8 +62,16 @@ read starts a fresh worker with the saved speed.
 
 - Select text in any application and press **F10**.
 - Left-click the bar icon to read the selection, or to stop active playback.
-- Right-click the icon for status, character count, the fixed voice name, and
-  the `0.5×–2.0×` speed slider. Speed changes are persisted in
+- Right-click the icon for status, the compact voice list, character count, and
+  the `0.5×–2.0×` speed slider. The voice list contains the four checked-in
+  official Piper choices: Lessac, Kristin, John, and Alba. It shows each
+  voice's US/UK region, medium quality, and approximate download size. Choose
+  **Download** for an uninstalled voice, then **Use** after its three files
+  pass their pinned size and SHA-256 checks. The selected voice is persisted in
+  the private `selected-voice` state file. A voice can be changed only while
+  OmaYap is idle; a warm old worker is evicted before the next read starts.
+  Only one model session is loaded at a time, and idle workers exit after 60
+  seconds. Speed changes are persisted in
   `~/.config/omayap-read-aloud/settings.json` and affect the next chunk. The
   same popup selects the reading cleanup profile: **Safe** (the default),
   **Off**, or **Article**.
@@ -140,10 +152,23 @@ no usable count and gets only a fixed-limit notification. An oversized
 clipboard backup is refused before the clipboard is cleared, so it can never
 be restored truncated. Empty/stale selections are not spoken.
 
-The current bundled voice is CPU-based and English-only. There is no cloud TTS
-endpoint, language detection, document import, pause/seek UI, or voice
+The bundled voices are CPU-based and English-only. There is no cloud TTS
+endpoint, language detection, document import, pause/seek UI, arbitrary-model
+input, multi-speaker selection, accelerator/NPU path, preview, or voice
 marketplace. OCR remains local to Omarchy's installed capture tools; it does
-not upload screenshots or recognized text.
+not upload screenshots or recognized text. The checked-in catalog and its
+official links are in [`share/voices.json`](share/voices.json). The voice
+files are distributed by the official [Piper voice repository](https://huggingface.co/rhasspy/piper-voices).
+For clear attribution and terms disclosure, the four shipped choices link to
+their official model cards and dataset terms here:
+
+- [Lessac medium model card](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/lessac/medium/MODEL_CARD) · [Blizzard Challenge 2013 license](https://www.cstr.ed.ac.uk/projects/blizzard/2013/lessac_blizzard2013/license.html)
+- [Kristin medium model card](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/kristin/medium/MODEL_CARD) · [LibriVox public-domain terms](https://librivox.org)
+- [John medium model card](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/john/medium/MODEL_CARD) · [LibriVox public-domain terms](https://librivox.org)
+- [Alba medium model card](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_GB/alba/medium/MODEL_CARD) · [Creative Commons Attribution 4.0 terms](https://creativecommons.org/licenses/by/4.0/)
+
+Piper's runtime documentation is available in the official
+[OHF-Voice/piper1-gpl repository](https://github.com/OHF-Voice/piper1-gpl).
 
 ## Update and remove
 
