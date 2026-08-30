@@ -1,7 +1,7 @@
 # OmaYap backend protocol v1
 
 This document defines the private protocol between the OmaYap service and a
-speech backend. It is deliberately small so a future OCR, Codex, or native
+speech backend. It is deliberately small so a future OCR or native
 backend adapter can replace the Piper worker without changing the service
 boundary.
 
@@ -33,17 +33,15 @@ contains another value, the backend emits one metadata-only state event with
 
 ## Adapter boundary
 
-OCR capture and Codex alerts are adapters outside this transport. They hand
-bounded UTF-8 text to the same generic `speak` request; they do not add a
-second backend command or put text in a state event. The OCR adapter reuses
+OCR capture is an adapter outside this transport. It hands bounded UTF-8 text
+to the same generic `speak` request; it does not add a second backend command
+or put text in a state event. The OCR adapter reuses
 Omarchy's installed local capture command through a reviewed stdout-only shim,
-preserves `OMARCHY_OCR_LANGS`, and does not write CLIPBOARD. The Codex adapter
-uses a private, short-lived 0600 FIFO under the user's 0700
-`XDG_RUNTIME_DIR/omayap-read-aloud` directory. It validates ownership, type,
-mode, token, UTF-8, and limits before reading. Neither adapter stores message
-text in a regular file, command-line argument, environment value, diagnostic,
-notification, or state event. A future C++/Rust backend can implement this
-same stdin/stdout contract without changing those adapter boundaries.
+preserves `OMARCHY_OCR_LANGS`, and does not write CLIPBOARD. It does not store
+recognized text in a regular file, command-line argument, environment value,
+diagnostic, notification, or state event. A future C++/Rust backend can
+implement this same stdin/stdout contract without changing that adapter
+boundary.
 
 ## Requests
 

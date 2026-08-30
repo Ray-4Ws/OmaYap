@@ -85,9 +85,8 @@ read starts a fresh worker with the saved speed.
   queued and starts as soon as that metadata-only scan finishes; the first
   shortcut after setup is not discarded.
 - The service IPC target is `omayap.read-aloud` with `toggleSelection`,
-  `readSelection`, `readOcr`, `speakRequest`, `stop`, `setSpeed`,
-  `setCleanupProfile`, and `status` methods. `speakRequest` is the private
-  FIFO entry point used by the optional Codex bridge.
+  `readSelection`, `readOcr`, `stop`, `setSpeed`, `setCleanupProfile`, and
+  `status` methods.
 - The private backend stdin/stdout contract is documented in
   [`docs/backend-protocol.md`](docs/backend-protocol.md); selection reads use
   its generic `speak` command.
@@ -95,22 +94,6 @@ read starts a fresh worker with the saved speed.
 F10 and Ctrl+F10 are installed by setup rather than by the plugin manifest
 because Omarchy plugin installation does not modify keybindings. The bar
 widget defaults to the right section and cannot be duplicated.
-
-### Codex yaps (optional)
-
-The repository includes an instruction-only Codex skill for fixed completion,
-permission, attention, and failure alerts, plus short custom alerts. Install
-it explicitly when wanted; setup never installs it automatically:
-
-```bash
-~/.config/omarchy/plugins/omayap.read-aloud/bin/install-codex-skill
-```
-
-The `omayap-yaps` skill sends fixed event text by default. Custom text must be
-provided through the `bin/yap custom` process's stdin, never as an argument,
-environment value, notification, log, or regular temporary file. The bridge
-uses a private, short-lived FIFO under `XDG_RUNTIME_DIR`; it is local and
-bounded to the same 20,000-code-point limit.
 
 ## Selection and privacy
 
@@ -147,14 +130,22 @@ OmaYap's OCR path. Every replaceable command that produces data for QML runs
 through the dependency-free `share/bounded_capture.py` helper: MIME metadata
 is capped at 4 KiB, selection reads at 80,004 bytes (enough to count 20,001
 four-byte UTF-8 code points), active-window metadata at 16 KiB, and the
-temporary clipboard backup at 1 MiB. The helper kills and reaps an overflowing
-producer and emits no partial stdout. The worker and QML service then enforce
+temporary clipboard backup at 1 MiB. Non-interactive captures have a five-second
+deadline; interactive OCR has a two-minute safety deadline. On overflow or
+timeout, the helper discards all output, terminates the producer's complete
+process group, and makes bounded attempts to reap it. The worker and QML service then enforce
 a 20,000-Unicode-code-point limit; an oversized selection is rejected in full
 and, when the bounded read completes, the notification reports the exact
 code-point count and allowed limit. A producer that overflows its byte cap has
 no usable count and gets only a fixed-limit notification. An oversized
 clipboard backup is refused before the clipboard is cleared, so it can never
 be restored truncated. Empty/stale selections are not spoken.
+
+Settings are accepted only from a private `0600` regular file in OmaYap's
+private `0700` configuration directory. Reads use no-follow and nonblocking
+descriptor verification with a 4 KiB limit. Writes arrive over helper stdin
+and replace the file atomically through a randomized, exclusive temporary
+file; symlinks, FIFOs, and non-private objects are rejected.
 
 Each new playback stream begins with a 160 ms silent PCM lead-in so USB,
 Bluetooth, and power-saving audio paths can wake without clipping the first
@@ -285,8 +276,7 @@ The final validation used for a checkout is:
 ```bash
 tests/run
 omarchy plugin validate .
-bash -n bin/setup bin/capture-ocr bin/yap bin/read-yap-fifo \
-  bin/install-codex-skill bin/uninstall tests/run
-python3 -m compileall -q worker share tests benchmarks bin/yap bin/read-yap-fifo
+bash -n bin/setup bin/capture-ocr bin/uninstall tests/run
+python3 -m compileall -q worker share tests benchmarks bin/manage-voices
 git diff --check
 ```

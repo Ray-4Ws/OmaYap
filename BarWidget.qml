@@ -12,8 +12,7 @@ BarWidget {
   readonly property string state: readAloud ? String(readAloud.status || "idle") : "setup-required"
   readonly property bool ocrBusy: readAloud ? Boolean(readAloud.ocrBusy) : false
   readonly property bool active: state === "capturing" || state === "loading" || state === "speaking" || state === "stopping"
-    || (readAloud && (Boolean(readAloud.ocrBusy) || Boolean(readAloud.bridgeBusy)
-      || Boolean(readAloud.ocrCancelPending) || Boolean(readAloud.bridgeCancelPending)
+    || (readAloud && (Boolean(readAloud.ocrBusy) || Boolean(readAloud.ocrCancelPending)
       || Boolean(readAloud.voiceManagerMutating)))
   readonly property bool voiceActionsBusy: readAloud && readAloud.voiceActionsBusy
   readonly property string voiceName: readAloud ? String(readAloud.voiceName || "en_US-lessac-medium") : "en_US-lessac-medium"
