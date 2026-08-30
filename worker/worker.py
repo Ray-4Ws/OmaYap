@@ -82,6 +82,7 @@ _SPEECH_PUNCTUATION_REPLACEMENTS = {
     "\u3001": ",",
     "\u3002": ".",
 }
+_ESCAPED_UNICODE_RE = re.compile(r"\\(?:u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8}))")
 _ARTICLE_NUMBER = r"\d+(?:\s*(?:[-–—]|to)\s*\d+|\s*,\s*\d+)*"
 _ARTICLE_CITATION_RE = re.compile(
     rf"(?P<space>[ \t]*)\[(?P<body>(?:{_ARTICLE_NUMBER}|notes?\s+{_ARTICLE_NUMBER}|citation\s+needed))\]",
@@ -218,6 +219,23 @@ def _speech_punctuation_cleanup(value: str) -> str:
     return "".join(cleaned)
 
 
+def _decode_escaped_punctuation(value: str) -> str:
+    """Decode only literal Unicode escapes that represent punctuation."""
+
+    def replace(match: re.Match[str]) -> str:
+        codepoint = int(match.group(1) or match.group(2), 16)
+        if codepoint > 0x10FFFF:
+            return match.group(0)
+        character = chr(codepoint)
+        if character in _SPEECH_PUNCTUATION_REPLACEMENTS:
+            return character
+        if unicodedata.category(character).startswith("P"):
+            return character
+        return match.group(0)
+
+    return _ESCAPED_UNICODE_RE.sub(replace, value)
+
+
 def _article_cleanup(text: str) -> str:
     removed_citation = False
 
@@ -245,6 +263,7 @@ def cleanup_text(text: str, profile: str = DEFAULT_CLEANUP_PROFILE) -> str:
     normalized = normalize_text(text)
     if profile == "off":
         return normalized
+    normalized = _decode_escaped_punctuation(normalized)
     if profile == "article":
         normalized = _article_cleanup(normalized)
     return _safe_cleanup(_speech_punctuation_cleanup(normalized))

@@ -191,6 +191,10 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(cleanup_text("A\u00a0B\u00adC\r\nD", "off"), "A\u00a0B\u00adC\nD")
         self.assertEqual(cleanup_text("one—two – three", "safe"), "one, two, three")
         self.assertEqual(
+            cleanup_text(r"one \u2014 two \u0061 \U00002014 three", "safe"),
+            r"one, two \u0061, three",
+        )
+        self.assertEqual(
             cleanup_text("“It’s ready…” — really※ yes。 ¡Hello! ¿Ready?", "safe"),
             '"It\'s ready...", really, yes. Hello. Ready?',
         )
