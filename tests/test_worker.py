@@ -73,6 +73,42 @@ class FakeSink:
 
 
 class AudioSinkTests(unittest.TestCase):
+    def test_first_write_has_one_short_silent_preroll(self):
+        writes: list[bytes] = []
+
+        class RecordingStdin:
+            def write(self, data: bytes) -> int:
+                writes.append(data)
+                return len(data)
+
+            def flush(self) -> None:
+                return
+
+            def close(self) -> None:
+                return
+
+        class FakeProcess:
+            stdin = RecordingStdin()
+
+            def wait(self, timeout: float = 0) -> int:
+                return 0
+
+            def kill(self) -> None:
+                return
+
+        sink = AudioSink(command=["fake-pw-play"])
+        first = b"\x01\x02" * 8
+        second = b"\x03\x04" * 8
+        sample_rate = 22_050
+        expected_silence = bytes((sample_rate * sink.PREROLL_MS // 1000) * 2)
+
+        with patch("worker.worker.subprocess.Popen", return_value=FakeProcess()):
+            sink.write(first, sample_rate)
+            sink.write(second, sample_rate)
+            sink.finish()
+
+        self.assertEqual(writes, [expected_silence + first, second])
+
     def test_stop_can_kill_player_while_write_is_blocked(self):
         """Regression test for the stop button waiting on a PipeWire write."""
 

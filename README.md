@@ -62,13 +62,14 @@ read starts a fresh worker with the saved speed.
 
 - Select text in any application and press **F10**.
 - Left-click the bar icon to read the selection, or to stop active playback.
-- Right-click the icon for status, the compact voice list, character count, and
-  the `0.5×–2.0×` speed slider. The voice list contains the four checked-in
+- Hover over the bar icon for its current status and left/right-click actions.
+  Right-click it for the voice selector, character count, and the
+  `0.5×–2.0×` speed slider. The voice dropdown contains the four checked-in
   official Piper choices: Lessac, Kristin, John, and Alba. It shows each
-  voice's US/UK region, medium quality, and approximate download size. Choose
-  **Download** for an uninstalled voice, then **Use** after its three files
-  pass their pinned size and SHA-256 checks. The selected voice is persisted in
-  the private `selected-voice` state file. A voice can be changed only while
+  voice's US/UK region, medium quality, and approximate download size. Choosing
+  an uninstalled voice downloads its three files, verifies their pinned sizes
+  and SHA-256 checks, and selects it automatically. The selected voice is
+  persisted in the private `selected-voice` state file. A voice can be changed only while
   OmaYap is idle; a warm old worker is evicted before the next read starts.
   Only one model session is loaded at a time, and idle workers exit after 60
   seconds. Speed changes are persisted in
@@ -80,6 +81,9 @@ read starts a fresh worker with the saved speed.
   CLIPBOARD; the native OCR language setting is inherited from
   `OMARCHY_OCR_LANGS`. Empty capture means cancellation, and recognized text
   is capped at 20,000 Unicode code points before it reaches Piper.
+- A selection or OCR shortcut pressed during the initial voice-catalog scan is
+  queued and starts as soon as that metadata-only scan finishes; the first
+  shortcut after setup is not discarded.
 - The service IPC target is `omayap.read-aloud` with `toggleSelection`,
   `readSelection`, `readOcr`, `speakRequest`, `stop`, `setSpeed`,
   `setCleanupProfile`, and `status` methods. `speakRequest` is the private
@@ -152,7 +156,9 @@ no usable count and gets only a fixed-limit notification. An oversized
 clipboard backup is refused before the clipboard is cleared, so it can never
 be restored truncated. Empty/stale selections are not spoken.
 
-The bundled voices are CPU-based and English-only. There is no cloud TTS
+Each new playback stream begins with a 160 ms silent PCM lead-in so USB,
+Bluetooth, and power-saving audio paths can wake without clipping the first
+spoken character. The bundled voices are CPU-based and English-only. There is no cloud TTS
 endpoint, language detection, document import, pause/seek UI, arbitrary-model
 input, multi-speaker selection, accelerator/NPU path, preview, or voice
 marketplace. OCR remains local to Omarchy's installed capture tools; it does

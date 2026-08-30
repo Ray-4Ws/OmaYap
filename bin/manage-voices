@@ -226,7 +226,7 @@ def network_stream(url: str, expected_size: int) -> BinaryIO:
     if not url.startswith("https://huggingface.co/rhasspy/piper-voices/"):
         fail("catalog-invalid")
     try:
-        request = Request(url, headers={"User-Agent": "OmaYap/1.4.0"})
+        request = Request(url, headers={"User-Agent": "OmaYap/1.5.0"})
         response = urlopen(request, timeout=30)  # nosec B310: catalog URLs are fixed and HTTPS-only
         final_url = response.geturl()
         if not valid_response_url(final_url):

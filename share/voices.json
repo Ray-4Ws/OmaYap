@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "catalogVersion": "1.4.0",
+  "catalogVersion": "1.5.0",
   "defaultVoice": "en_US-lessac-medium",
   "voices": [
     {

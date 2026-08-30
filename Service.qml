@@ -12,7 +12,7 @@ Item {
   property string omarchyPath: ""
 
   readonly property string pluginId: "omayap.read-aloud"
-  readonly property string pluginVersion: "1.4.0"
+  readonly property string pluginVersion: "1.5.0"
   readonly property int workerProtocolVersion: 1
   readonly property int maxWorkerRequestIdChars: 128
   readonly property string defaultVoiceName: "en_US-lessac-medium"
@@ -66,6 +66,8 @@ Item {
   property bool bridgeBusy: false
   property bool voiceManagerBusy: false
   property bool voiceManagerCancelPending: false
+  property string pendingReadAfterVoiceList: ""
+  property string pendingVoiceSelection: ""
   // A canceled helper may still deliver its collector/exit signals after
   // running is set false.  Keep a replacement from reusing those fields
   // until both signals have drained.
@@ -78,7 +80,9 @@ Item {
   property bool expectedWorkerExit: false
   property int requestSerial: 0
   property bool workerProtocolErrorNotified: false
-  readonly property bool active: status === "capturing" || status === "loading" || status === "speaking" || status === "stopping" || root.ocrBusy || root.bridgeBusy || root.ocrCancelPending || root.bridgeCancelPending || root.voiceManagerBusy || root.voiceManagerCancelPending
+  readonly property bool voiceManagerMutating: (root.voiceManagerOperation === "install" || root.voiceManagerOperation === "select")
+    && (root.voiceManagerBusy || root.voiceManagerCancelPending)
+  readonly property bool active: status === "capturing" || status === "loading" || status === "speaking" || status === "stopping" || root.ocrBusy || root.bridgeBusy || root.ocrCancelPending || root.bridgeCancelPending || root.voiceManagerMutating
   readonly property bool voiceActionsBusy: root.voiceManagerBusy || root.voiceManagerCancelPending || root.expectedWorkerExit
 
   // Capture state is intentionally transient.  No selection is written to a
@@ -466,11 +470,30 @@ Item {
 
   function finishCancelledVoiceManager() {
     if (!root.voiceManagerCancelPending || !root.voiceManagerExited || !root.voiceManagerStreamFinished) return
+    var operation = root.voiceManagerOperation
     root.voiceManagerCancelPending = false
     root.voiceManagerOutput = ""
     root.voiceManagerExitCode = -1
     if (root.voiceManagerOperation === "list") root.voiceListRequested = false
     root.voiceManagerOperation = ""
+    if (operation === "install" || operation === "select") root.pendingVoiceSelection = ""
+  }
+
+  function queueReadAfterVoiceList(action) {
+    if (!root.voiceManagerBusy || root.voiceManagerOperation !== "list") return false
+    if (["selection", "ocr"].indexOf(action) === -1) return false
+    root.pendingReadAfterVoiceList = action
+    return true
+  }
+
+  function releaseReadAfterVoiceList() {
+    var action = root.pendingReadAfterVoiceList
+    root.pendingReadAfterVoiceList = ""
+    if (!action) return
+    Qt.callLater(function() {
+      if (action === "ocr") root.readOcr()
+      else if (action === "selection") root.readSelection()
+    })
   }
 
   function finishVoiceManager() {
@@ -493,6 +516,8 @@ Item {
         // Keep the fixed generic code when the manager did not return JSON.
       }
       root.voiceManagerNotice(operation, failedCode)
+      if (operation === "install" || operation === "select") root.pendingVoiceSelection = ""
+      if (operation === "list") root.releaseReadAfterVoiceList()
       return
     }
     var parsed
@@ -500,24 +525,33 @@ Item {
       parsed = JSON.parse(output)
     } catch (error) {
       root.voiceManagerNotice(operation, "manager-protocol-invalid")
+      if (operation === "install" || operation === "select") root.pendingVoiceSelection = ""
+      if (operation === "list") root.releaseReadAfterVoiceList()
       return
     }
     if (operation === "list") {
       if (!root.applyVoiceList(output)) root.voiceManagerNotice(operation, "manager-protocol-invalid")
+      root.releaseReadAfterVoiceList()
       return
     }
     if (!parsed || parsed.ok !== true || parsed.command !== operation || !root.validVoiceId(parsed.voice)) {
       root.voiceManagerNotice(operation, "manager-protocol-invalid")
+      if (operation === "install" || operation === "select") root.pendingVoiceSelection = ""
       return
     }
     if (operation === "install") {
-      root.notify("OmaYap voice ready", "The voice was downloaded and verified. Choose Use to switch voices.")
+      if (root.pendingVoiceSelection === parsed.voice
+          && root.beginVoiceManager("select", ["select", parsed.voice])) return
+      root.pendingVoiceSelection = ""
+      root.notify("OmaYap voice ready", "The voice was downloaded and verified.")
       root.requestVoiceList()
     } else if (operation === "select") {
       var changed = parsed.voice !== root.voiceName
+      root.pendingVoiceSelection = ""
       root.setVoicePaths(parsed.voice)
       if (changed && workerProc.running && root.status === "idle" && !root.stopPending)
         root.evictIdleWorker()
+      root.notify("OmaYap voice selected", "The selected voice will be used for the next reading.")
       root.requestVoiceList()
     }
   }
@@ -553,7 +587,11 @@ Item {
 
   function installVoice(id) {
     if (!root.validVoiceId(id) || root.setupRequired || root.active || root.voiceActionsBusy || root.status !== "idle") return "busy"
-    if (!root.beginVoiceManager("install", ["install", id])) return "busy"
+    root.pendingVoiceSelection = id
+    if (!root.beginVoiceManager("install", ["install", id])) {
+      root.pendingVoiceSelection = ""
+      return "busy"
+    }
     return "ok"
   }
 
@@ -573,6 +611,8 @@ Item {
     root.voiceManagerCancelPending = !(root.voiceManagerExited && root.voiceManagerStreamFinished)
     if (voiceManagerProc.running) voiceManagerProc.running = false
     if (!root.voiceManagerCancelPending) root.voiceManagerOperation = ""
+    root.pendingReadAfterVoiceList = ""
+    root.pendingVoiceSelection = ""
   }
 
   function statusJson() {
@@ -836,6 +876,7 @@ Item {
     // A fallback capture may still be restoring the user's clipboard. Do not
     // start another capture until that asynchronous restore has completed; an
     // old wl-copy exit would otherwise clear the new capture's state.
+    if (root.queueReadAfterVoiceList("selection")) return
     if (root.captureStage === "restore" || root.stopPending || root.ocrBusy || root.bridgeBusy
         || root.voiceManagerBusy || root.voiceManagerCancelPending) return
     if (root.setupRequired) {
@@ -864,6 +905,7 @@ Item {
       root.setupHint()
       return "unavailable"
     }
+    if (root.queueReadAfterVoiceList("ocr")) return "queued"
     // OCR capture is intentionally independent of CLIPBOARD and cannot
     // interrupt a selection, another OCR capture, playback, or a Codex alert.
     if (root.active || root.captureStage !== "idle" || root.stopPending || root.ocrCancelPending || root.bridgeCancelPending || ocrProc.running) return "busy"

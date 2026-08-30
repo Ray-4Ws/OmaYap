@@ -324,6 +324,13 @@ def _synthesis_config(speed: float) -> Any:
 class AudioSink:
     """Stream signed 16-bit mono PCM into one pw-play process per reading."""
 
+    # USB, Bluetooth, and power-saving audio paths can need a brief wake-up
+    # after pw-play creates a fresh stream.  Leading zero-valued PCM keeps that
+    # device transition from consuming the first phoneme of the actual speech.
+    # This is intentionally small: enough to mask the observed cold-start clip
+    # without adding a noticeable pause or retaining another audio buffer.
+    PREROLL_MS = 160
+
     def __init__(self, command: Optional[list[str]] = None) -> None:
         self.command = command or ["pw-play"]
         self.process: Optional[subprocess.Popen[bytes]] = None
@@ -359,6 +366,7 @@ class AudioSink:
         # seconds).  Killing the detached process below unblocks the writer
         # and causes it to fail harmlessly with BrokenPipeError/OSError.
         with self._lock:
+            started = self.process is None
             if self.process is None:
                 self._start(sample_rate)
             process = self.process
@@ -366,7 +374,11 @@ class AudioSink:
                 raise RuntimeError("audio-player-unavailable")
             stream = process.stdin
         try:
-            stream.write(data)
+            payload = data
+            if started:
+                silent_frames = max(1, int(sample_rate) * self.PREROLL_MS // 1000)
+                payload = bytes(silent_frames * 2) + data
+            stream.write(payload)
             stream.flush()
         except (BrokenPipeError, OSError) as exc:
             raise RuntimeError("audio-player-failed") from exc
