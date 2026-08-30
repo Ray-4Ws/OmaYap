@@ -75,7 +75,9 @@ read starts a fresh worker with the saved speed.
   seconds. Speed changes are persisted in
   `~/.config/omayap-read-aloud/settings.json` and affect the next chunk. The
   same popup selects the reading cleanup profile: **Safe** (the default),
-  **Off**, or **Article**.
+  **Off**, or **Article**. Safe normalizes speech-hostile Unicode punctuation
+  to Piper-friendly punctuation that retains natural pauses; Article applies
+  the same normalization and also removes conservative citation markers.
 - Use **Ctrl+F10** or the bar popup's **Read text from screen (OCR)** action to
   run Omarchy's installed local screen-text capture. It does not modify
   CLIPBOARD; the native OCR language setting is inherited from

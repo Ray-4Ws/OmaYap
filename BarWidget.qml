@@ -112,7 +112,7 @@ BarWidget {
   function cleanupProfileTooltip(value) {
     if (value === "off") return "Minimal cleanup\nNormalizes line endings only."
     if (value === "article") return "Article cleanup\nAlso removes conservative citation markers."
-    return "Natural reading (recommended)\nCleans spacing and control characters."
+    return "Natural reading (recommended)\nCleans spacing, controls, and speech-hostile punctuation."
   }
 
   function setCleanupProfile(value) {

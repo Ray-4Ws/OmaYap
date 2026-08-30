@@ -56,6 +56,32 @@ def normalize_text(text: str) -> str:
 
 
 _REMOVED_SAFE_CHARACTERS = frozenset("\u00ad\u200b\u2060\ufeff")
+_SPEECH_PUNCTUATION_REPLACEMENTS = {
+    "!": ".",
+    "\u00a1": " ",
+    "\u00ab": '"',
+    "\u00bb": '"',
+    "\u00bf": " ",
+    "\u2010": ", ",
+    "\u2011": ", ",
+    "\u2012": ", ",
+    "\u2013": ", ",
+    "\u2014": ", ",
+    "\u2015": ", ",
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201a": "'",
+    "\u201b": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u201e": '"',
+    "\u201f": '"',
+    "\u2026": "...",
+    "\u2032": "'",
+    "\u2033": '"',
+    "\u3001": ",",
+    "\u3002": ".",
+}
 _ARTICLE_NUMBER = r"\d+(?:\s*(?:[-–—]|to)\s*\d+|\s*,\s*\d+)*"
 _ARTICLE_CITATION_RE = re.compile(
     rf"(?P<space>[ \t]*)\[(?P<body>(?:{_ARTICLE_NUMBER}|notes?\s+{_ARTICLE_NUMBER}|citation\s+needed))\]",
@@ -91,6 +117,7 @@ def _safe_cleanup(text: str) -> str:
 
     value = "".join(cleaned)
     value = re.sub(r" {2,}", " ", value)
+    value = re.sub(r" +([,.;:!?])", r"\1", value)
     value = re.sub(r" *\n *", "\n", value)
     value = re.sub(r"\n{3,}", "\n\n", value)
     return value.strip(" \n")
@@ -162,6 +189,35 @@ def _article_citation_is_adjacent(value: str, match: re.Match[str]) -> bool:
     return bool(token)
 
 
+def _speech_punctuation_cleanup(value: str) -> str:
+    """Make punctuation predictable for Piper without changing word text."""
+
+    # English Piper voices are most reliable with ASCII punctuation. Preserve
+    # prosody by mapping punctuation roles to pauses and structural ASCII,
+    # rather than simply deleting characters that the phonemizer may spell as
+    # Unicode escapes.
+    cleaned: list[str] = []
+    for character in value:
+        replacement = _SPEECH_PUNCTUATION_REPLACEMENTS.get(character)
+        if replacement is not None:
+            cleaned.append(replacement)
+        elif not character.isascii() and unicodedata.category(character).startswith("P"):
+            category = unicodedata.category(character)
+            if category == "Ps":
+                cleaned.append("(")
+            elif category == "Pe":
+                cleaned.append(")")
+            elif category in {"Pi", "Pf"}:
+                cleaned.append('"')
+            elif category == "Pd":
+                cleaned.append(", ")
+            else:
+                cleaned.append(", ")
+        else:
+            cleaned.append(character)
+    return "".join(cleaned)
+
+
 def _article_cleanup(text: str) -> str:
     removed_citation = False
 
@@ -189,8 +245,9 @@ def cleanup_text(text: str, profile: str = DEFAULT_CLEANUP_PROFILE) -> str:
     normalized = normalize_text(text)
     if profile == "off":
         return normalized
-    cleaned = _safe_cleanup(normalized)
-    return _article_cleanup(cleaned) if profile == "article" else cleaned
+    if profile == "article":
+        normalized = _article_cleanup(normalized)
+    return _safe_cleanup(_speech_punctuation_cleanup(normalized))
 
 
 def _sentence_boundary(text: str, start: int, end: int) -> int:

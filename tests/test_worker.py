@@ -189,6 +189,15 @@ class WorkerTests(unittest.TestCase):
             "A B\nCDEFGHI\u200c\u200d\u202e\ufe0f",
         )
         self.assertEqual(cleanup_text("A\u00a0B\u00adC\r\nD", "off"), "A\u00a0B\u00adC\nD")
+        self.assertEqual(cleanup_text("one—two – three", "safe"), "one, two, three")
+        self.assertEqual(
+            cleanup_text("“It’s ready…” — really※ yes。 ¡Hello! ¿Ready?", "safe"),
+            '"It\'s ready...", really, yes. Hello. Ready?',
+        )
+        self.assertEqual(
+            cleanup_text("Before（a quiet aside）after", "safe"),
+            "Before(a quiet aside)after",
+        )
         self.assertEqual(DEFAULT_CLEANUP_PROFILE, "safe")
         self.assertEqual(CLEANUP_PROFILES, ("off", "safe", "article"))
 

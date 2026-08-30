@@ -70,8 +70,10 @@ text after the selected profile is applied is rejected with
 only the existing line-ending and NFC normalization. `safe` additionally
 maps Unicode horizontal/paragraph whitespace, removes C0/C1 controls except
 meaningful tab/newline whitespace, removes soft hyphen, zero-width space,
-word joiner, and BOM, and collapses excessive whitespace. It preserves ZWNJ,
-ZWJ, bidi marks/isolates, combining marks, and variation selectors. `article`
+word joiner, and BOM, and normalizes speech-hostile Unicode punctuation to
+prosody-preserving ASCII pauses, quotes, and brackets rather than letting Piper
+spell Unicode escapes. It also collapses excessive whitespace. It preserves
+ZWNJ, ZWJ, bidi marks/isolates, combining marks, and variation selectors. `article`
 adds conservative removal of adjacent MediaWiki-style numeric, note, and
 `citation needed` markers; it does not remove arbitrary bracketed prose,
 standalone arrays, math subscripts, or code-like markers.
