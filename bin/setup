@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-PLUGIN_VERSION="1.5.1"
+PLUGIN_VERSION="1.5.2"
 VOICE="en_US-lessac-medium"
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -383,7 +383,7 @@ main() {
     --help|-h)
       echo "Usage: bin/setup"
       echo "Installs the local Piper runtime and manages the F10 and CTRL+F10 OmaYap bindings."
-      echo "OCR uses Omarchy's local capture flow; Codex yaps are opt-in via bin/install-codex-skill."
+      echo "OCR uses Omarchy's installed local capture flow."
       return 0
       ;;
     *) die "unknown option: $1" ;;

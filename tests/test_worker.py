@@ -14,7 +14,7 @@ import sys
 from typing import Any
 from unittest.mock import patch
 
-from share.bounded_capture import OVERFLOW_EXIT_CODE
+from share.bounded_capture import OVERFLOW_EXIT_CODE, TIMEOUT_EXIT_CODE
 from share.capture import CommandResult, capture_selection
 from benchmarks.memory import (
     RepeatBenchmarkResult,
@@ -983,13 +983,21 @@ class BoundedCaptureTests(unittest.TestCase):
     def helper_path() -> Path:
         return Path(__file__).resolve().parents[1] / "share" / "bounded_capture.py"
 
-    def run_helper(self, cap: int, producer: str, *producer_args: str) -> subprocess.CompletedProcess[bytes]:
+    def run_helper(
+        self,
+        cap: int,
+        producer: str,
+        *producer_args: str,
+        timeout_ms: int = 1000,
+    ) -> subprocess.CompletedProcess[bytes]:
         return subprocess.run(
             [
                 sys.executable,
                 str(self.helper_path()),
                 "--cap",
                 str(cap),
+                "--timeout-ms",
+                str(timeout_ms),
                 "--",
                 sys.executable,
                 "-c",
@@ -1017,6 +1025,43 @@ class BoundedCaptureTests(unittest.TestCase):
         self.assertEqual(result.returncode, OVERFLOW_EXIT_CODE)
         self.assertEqual(result.stdout, b"")
         self.assertEqual(result.stderr, b"")
+
+    def test_timeout_kills_descendant_that_keeps_stdout_open(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pid_path = Path(directory) / "descendant.pid"
+            producer = """
+import os
+import pathlib
+import time
+
+pid_path = pathlib.Path(__import__('sys').argv[1])
+child = os.fork()
+if child == 0:
+    pid_path.write_text(str(os.getpid()), encoding='ascii')
+    while True:
+        time.sleep(10)
+os._exit(0)
+"""
+            started = time.monotonic()
+            result = self.run_helper(8, producer, str(pid_path), timeout_ms=200)
+            elapsed = time.monotonic() - started
+            self.assertEqual(result.returncode, TIMEOUT_EXIT_CODE)
+            self.assertEqual(result.stdout, b"")
+            self.assertEqual(result.stderr, b"")
+            self.assertLess(elapsed, 2.0)
+            descendant = int(pid_path.read_text(encoding="ascii"))
+
+            def descendant_terminated() -> bool:
+                try:
+                    state = Path(f"/proc/{descendant}/stat").read_text(encoding="ascii").split()[2]
+                except (FileNotFoundError, IndexError, OSError):
+                    return True
+                return state == "Z"
+
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline and not descendant_terminated():
+                time.sleep(0.01)
+            self.assertTrue(descendant_terminated())
 
 
 if __name__ == "__main__":

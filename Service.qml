@@ -12,7 +12,7 @@ Item {
   property string omarchyPath: ""
 
   readonly property string pluginId: "omayap.read-aloud"
-  readonly property string pluginVersion: "1.5.1"
+  readonly property string pluginVersion: "1.5.2"
   readonly property int workerProtocolVersion: 1
   readonly property int maxWorkerRequestIdChars: 128
   readonly property string defaultVoiceName: "en_US-lessac-medium"
@@ -29,13 +29,16 @@ Item {
   readonly property int mimeByteCap: 4096
   readonly property int clipboardByteCap: 1048576
   readonly property int activeWindowByteCap: 16384
+  readonly property int captureTimeoutMs: 5000
+  readonly property int ocrTimeoutMs: 120000
+  readonly property int boundedTimeoutExitCode: 124
   readonly property int boundedOverflowExitCode: 125
   readonly property string home: Quickshell.env("HOME")
   readonly property string configHome: Quickshell.env("XDG_CONFIG_HOME") || (home + "/.config")
   readonly property string dataHome: Quickshell.env("XDG_DATA_HOME") || (home + "/.local/share")
-  readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") || ""
   readonly property string dataRoot: dataHome + "/omayap-read-aloud"
   readonly property string settingsPath: configHome + "/omayap-read-aloud/settings.json"
+  readonly property string settingsStorePath: pluginRoot + "/share/settings_store.py"
   property string modelPath: dataRoot + "/models/en_US-lessac-medium.onnx"
   property string modelConfigPath: dataRoot + "/models/en_US-lessac-medium.onnx.json"
   property string modelCardPath: dataRoot + "/models/en_US-lessac-medium.MODEL_CARD"
@@ -64,7 +67,6 @@ Item {
   // selection before the old one is gone.
   property bool stopPending: false
   property bool ocrBusy: false
-  property bool bridgeBusy: false
   property bool voiceManagerBusy: false
   property bool voiceManagerCancelPending: false
   property string pendingReadAfterVoiceList: ""
@@ -73,7 +75,6 @@ Item {
   // running is set false.  Keep a replacement from reusing those fields
   // until both signals have drained.
   property bool ocrCancelPending: false
-  property bool bridgeCancelPending: false
   // A warm worker is useful while reading, but retaining ONNX Runtime's
   // allocator and model while the plugin is idle is expensive.  The worker
   // exits after this quiet period; the QML service and bar remain loaded.
@@ -83,7 +84,7 @@ Item {
   property bool workerProtocolErrorNotified: false
   readonly property bool voiceManagerMutating: (root.voiceManagerOperation === "install" || root.voiceManagerOperation === "select")
     && (root.voiceManagerBusy || root.voiceManagerCancelPending)
-  readonly property bool active: status === "capturing" || status === "loading" || status === "speaking" || status === "stopping" || root.ocrBusy || root.bridgeBusy || root.ocrCancelPending || root.bridgeCancelPending || root.voiceManagerMutating
+  readonly property bool active: status === "capturing" || status === "loading" || status === "speaking" || status === "stopping" || root.ocrBusy || root.ocrCancelPending || root.voiceManagerMutating
   readonly property bool voiceActionsBusy: root.voiceManagerBusy || root.voiceManagerCancelPending || root.expectedWorkerExit
 
   // Capture state is intentionally transient.  No selection is written to a
@@ -144,18 +145,13 @@ Item {
   property bool settingsExited: false
   property bool settingsReadHandled: false
   property int settingsExitCode: -1
+  property string pendingSettingsPayload: ""
+  property string settingsWritePayload: ""
   property string ocrOutput: ""
   property bool ocrStreamFinished: false
   property bool ocrExited: false
   property bool ocrHandled: false
   property int ocrExitCode: -1
-  property string bridgeOutput: ""
-  property bool bridgeStreamFinished: false
-  property bool bridgeExited: false
-  property bool bridgeHandled: false
-  property int bridgeExitCode: -1
-  property string bridgeToken: ""
-  property string bridgePath: ""
   property string voiceManagerOperation: ""
   property string voiceManagerOutput: ""
   property bool voiceManagerStreamFinished: false
@@ -186,10 +182,11 @@ Item {
     notify("OmaYap setup required", "Run bin/setup in the installed plugin directory.")
   }
 
-  function boundedCommand(cap, argv) {
+  function boundedCommand(cap, timeoutMs, argv) {
     // All commands here are fixed argv vectors.  The private selection never
     // enters this array; it only travels through the wrapper's stdout pipe.
-    return [root.pythonPath, root.pluginRoot + "/share/bounded_capture.py", "--cap", String(cap), "--"].concat(argv)
+    return [root.pythonPath, root.pluginRoot + "/share/bounded_capture.py",
+      "--cap", String(cap), "--timeout-ms", String(timeoutMs), "--"].concat(argv)
   }
 
   function codePointCount(value) {
@@ -203,17 +200,6 @@ Item {
       }
     }
     return count
-  }
-
-  function validBridgeToken(value) {
-    return typeof value === "string" && /^[0-9a-f]{32}$/.test(value)
-  }
-
-  function bridgeFifoPath(token) {
-    var runtime = String(root.runtimeDir || "").replace(/\/+$/, "")
-    if (!runtime || runtime === "/" || runtime.indexOf("\n") !== -1 || runtime.indexOf("\0") !== -1)
-      return ""
-    return runtime + "/omayap-read-aloud/request-" + token + ".fifo"
   }
 
   function rejectCapturedText(actual) {
@@ -306,72 +292,6 @@ Item {
     root.ocrCancelPending = !(root.ocrExited && root.ocrStreamFinished)
     if (ocrProc.running) ocrProc.running = false
     if (!root.ocrCancelPending) root.ocrOutput = ""
-  }
-
-  function finishBridge() {
-    if (!root.bridgeBusy || !root.bridgeExited || !root.bridgeStreamFinished || root.bridgeHandled) return
-    root.bridgeHandled = true
-    var exitCode = Number(root.bridgeExitCode)
-    var output = String(root.bridgeOutput || "")
-    var path = root.bridgePath
-    root.bridgeBusy = false
-    root.bridgeOutput = ""
-    root.bridgeToken = ""
-    root.bridgePath = ""
-    if (path) Quickshell.execDetached(["rm", "-f", "--", path])
-    if (exitCode === root.boundedOverflowExitCode) {
-      root.status = "idle"
-      root.errorCode = "yap-too-long"
-      root.notify("OmaYap alert too long", "The Codex alert exceeds the 20,000-character maximum. No text was read.")
-      return
-    }
-    if (exitCode !== 0) {
-      root.status = "idle"
-      root.errorCode = "yap-failed"
-      root.notify("OmaYap alert unavailable", "The Codex alert could not be received safely.")
-      return
-    }
-    if (output === "") {
-      root.status = "idle"
-      root.errorCode = ""
-      return
-    }
-    var actual = root.codePointCount(output)
-    if (actual > root.maxCharacters) {
-      root.status = "idle"
-      root.errorCode = "selection-too-long"
-      root.notify("OmaYap alert too long", actual.toLocaleString() + " characters received; maximum is " + root.maxCharacters.toLocaleString() + ".")
-      return
-    }
-    root.status = "idle"
-    root.errorCode = ""
-    root.workerCommand({
-      command: "speak",
-      text: output,
-      requestId: root.nextRequestId(),
-      cleanupProfile: root.cleanupProfile
-    })
-  }
-
-  function cancelBridge() {
-    if (!root.bridgeBusy) return
-    var path = root.bridgePath
-    root.bridgeBusy = false
-    root.bridgeHandled = true
-    root.bridgeOutput = ""
-    root.bridgeToken = ""
-    root.bridgePath = ""
-    root.bridgeCancelPending = !(root.bridgeExited && root.bridgeStreamFinished)
-    if (bridgeProc.running) bridgeProc.running = false
-    if (!root.bridgeCancelPending) root.bridgeOutput = ""
-    if (path) Quickshell.execDetached(["rm", "-f", "--", path])
-  }
-
-  function finishCancelledBridge() {
-    if (!root.bridgeCancelPending || !root.bridgeExited || !root.bridgeStreamFinished) return
-    root.bridgeCancelPending = false
-    root.bridgeOutput = ""
-    root.bridgeExitCode = -1
   }
 
   // ------------------------------------------------------ voice catalog
@@ -652,24 +572,27 @@ Item {
   function applySettingsIfSafe() {
     if (!root.settingsExited || !root.settingsStreamFinished || root.settingsReadHandled) return
     root.settingsReadHandled = true
-    // head -c 4097 is intentionally one byte over the accepted setting size:
-    // a 4097-byte file is observed and discarded without collecting more.
+    // The helper opens with no-follow/nonblocking flags, verifies the file
+    // descriptor, and emits at most 4 KiB from a private regular file.
     if (root.settingsExitCode === 0 && root.settingsOutput.length <= 4096)
       root.applySettings(root.settingsOutput)
   }
 
+  function startSettingsWrite() {
+    if (settingsWriteProc.running || root.pendingSettingsPayload === "") return
+    root.settingsWritePayload = root.pendingSettingsPayload
+    root.pendingSettingsPayload = ""
+    settingsWriteProc.stdinEnabled = true
+    settingsWriteProc.command = ["python3", root.settingsStorePath, "write", root.settingsPath]
+    settingsWriteProc.running = true
+  }
+
   function persistSpeed() {
-    var payload = JSON.stringify({
+    root.pendingSettingsPayload = JSON.stringify({
       speed: Number(root.speed.toFixed(3)),
       cleanupProfile: root.cleanupProfile
     })
-    settingsWriteProc.command = [
-      "bash", "-c",
-      "set -eu; umask 077; mkdir -p -- \"$(dirname -- \"$0\")\"; printf '%s\\n' \"$1\" > \"$0\"; chmod 600 -- \"$0\"",
-      root.settingsPath, payload
-    ]
-    settingsWriteProc.running = false
-    settingsWriteProc.running = true
+    root.startSettingsWrite()
   }
 
   function setSpeed(value) {
@@ -896,7 +819,7 @@ Item {
     // start another capture until that asynchronous restore has completed; an
     // old wl-copy exit would otherwise clear the new capture's state.
     if (root.queueReadUntilReady("selection")) return
-    if (root.captureStage === "restore" || root.stopPending || root.ocrBusy || root.bridgeBusy
+    if (root.captureStage === "restore" || root.stopPending || root.ocrBusy
         || root.voiceManagerBusy || root.voiceManagerCancelPending) return
     if (root.setupRequired) {
       root.setupHint()
@@ -914,7 +837,7 @@ Item {
     root.primaryTypesExited = false
     root.primaryTypesHandled = false
     root.primaryTypesExitCode = -1
-    primaryTypesProc.command = root.boundedCommand(root.mimeByteCap, ["wl-paste", "--list-types", "--primary"])
+    primaryTypesProc.command = root.boundedCommand(root.mimeByteCap, root.captureTimeoutMs, ["wl-paste", "--list-types", "--primary"])
     primaryTypesProc.running = false
     primaryTypesProc.running = true
   }
@@ -926,8 +849,8 @@ Item {
       return "unavailable"
     }
     // OCR capture is intentionally independent of CLIPBOARD and cannot
-    // interrupt a selection, another OCR capture, playback, or a Codex alert.
-    if (root.active || root.captureStage !== "idle" || root.stopPending || root.ocrCancelPending || root.bridgeCancelPending || ocrProc.running) return "busy"
+    // interrupt a selection, another OCR capture, or playback.
+    if (root.active || root.captureStage !== "idle" || root.stopPending || root.ocrCancelPending || ocrProc.running) return "busy"
     root.ocrBusy = true
     root.status = "capturing"
     root.errorCode = ""
@@ -936,34 +859,9 @@ Item {
     root.ocrExited = false
     root.ocrHandled = false
     root.ocrExitCode = -1
-    ocrProc.command = root.boundedCommand(root.selectionByteCap, [root.pluginRoot + "/bin/capture-ocr"])
+    ocrProc.command = root.boundedCommand(root.selectionByteCap, root.ocrTimeoutMs, [root.pluginRoot + "/bin/capture-ocr"])
     ocrProc.running = false
     ocrProc.running = true
-    return "ok"
-  }
-
-  function speakRequest(token) {
-    if (!root.validBridgeToken(token)) return "invalid"
-    if (root.setupRequired || root.stopPending) return "unavailable"
-    if (root.active || root.captureStage !== "idle" || root.ocrBusy || root.bridgeBusy || root.ocrCancelPending || root.bridgeCancelPending || bridgeProc.running)
-      return "busy"
-    var path = root.bridgeFifoPath(token)
-    if (!path) return "unavailable"
-    root.bridgeToken = token
-    root.bridgePath = path
-    root.bridgeOutput = ""
-    root.bridgeStreamFinished = false
-    root.bridgeExited = false
-    root.bridgeHandled = false
-    root.bridgeExitCode = -1
-    root.bridgeBusy = true
-    root.status = "capturing"
-    root.errorCode = ""
-    // The token is the only dynamic component. The fixed path is read through
-    // bounded_capture so the FIFO cannot provide unbounded memory to QML.
-    bridgeProc.command = root.boundedCommand(root.selectionByteCap, [root.pluginRoot + "/bin/read-yap-fifo", token])
-    bridgeProc.running = false
-    bridgeProc.running = true
     return "ok"
   }
 
@@ -977,7 +875,6 @@ Item {
     if (root.stopPending) return
     workerIdleTimer.stop()
     root.cancelOcr()
-    root.cancelBridge()
     root.cancelVoiceManager()
     root.cancelCapture(true)
     root.pendingWorkerCommands = []
@@ -1136,7 +1033,7 @@ Item {
     root.clipboardTypesExited = false
     root.clipboardTypesHandled = false
     root.clipboardTypesExitCode = -1
-    clipboardTypesProc.command = root.boundedCommand(root.mimeByteCap, ["wl-paste", "--list-types"])
+    clipboardTypesProc.command = root.boundedCommand(root.mimeByteCap, root.captureTimeoutMs, ["wl-paste", "--list-types"])
     clipboardTypesProc.running = false
     clipboardTypesProc.running = true
   }
@@ -1184,7 +1081,7 @@ Item {
     root.pollExited = false
     root.pollHandled = false
     root.pollExitCode = -1
-    pollProc.command = root.boundedCommand(root.selectionByteCap, ["wl-paste", "--no-newline", "--type", "text/plain"])
+    pollProc.command = root.boundedCommand(root.selectionByteCap, root.captureTimeoutMs, ["wl-paste", "--no-newline", "--type", "text/plain"])
     pollProc.running = false
     pollProc.running = true
   }
@@ -1216,7 +1113,7 @@ Item {
       root.primaryTextExited = false
       root.primaryTextHandled = false
       root.primaryTextExitCode = -1
-      primaryTextProc.command = root.boundedCommand(root.selectionByteCap, ["wl-paste", "--primary", "--type", "text/plain", "--no-newline"])
+      primaryTextProc.command = root.boundedCommand(root.selectionByteCap, root.captureTimeoutMs, ["wl-paste", "--primary", "--type", "text/plain", "--no-newline"])
       primaryTextProc.running = false
       primaryTextProc.running = true
     } else {
@@ -1288,7 +1185,7 @@ Item {
       root.clipboardTextExited = false
       root.clipboardTextHandled = false
       root.clipboardTextExitCode = -1
-      clipboardTextProc.command = root.boundedCommand(root.clipboardByteCap, ["wl-paste", "--no-newline", "--type", "text/plain"])
+      clipboardTextProc.command = root.boundedCommand(root.clipboardByteCap, root.captureTimeoutMs, ["wl-paste", "--no-newline", "--type", "text/plain"])
       clipboardTextProc.running = false
       clipboardTextProc.running = true
     }
@@ -1376,7 +1273,20 @@ Item {
     }
   }
 
-  Process { id: settingsWriteProc }
+  Process {
+    id: settingsWriteProc
+    stdinEnabled: true
+    onStarted: {
+      write(root.settingsWritePayload)
+      root.settingsWritePayload = ""
+      // The helper reads to EOF before atomically replacing settings.json.
+      stdinEnabled = false
+    }
+    onExited: {
+      if (root.pendingSettingsPayload !== "")
+        Qt.callLater(function() { root.startSettingsWrite() })
+    }
+  }
 
   Process {
     id: ocrProc
@@ -1394,25 +1304,6 @@ Item {
       root.ocrExited = true
       if (root.ocrCancelPending) root.finishCancelledOcr()
       else root.finishOcr()
-    }
-  }
-
-  Process {
-    id: bridgeProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.bridgeOutput = String(text || "")
-        root.bridgeStreamFinished = true
-        if (root.bridgeCancelPending) root.finishCancelledBridge()
-        else root.finishBridge()
-      }
-    }
-    onExited: function(exitCode) {
-      root.bridgeExitCode = exitCode
-      root.bridgeExited = true
-      if (root.bridgeCancelPending) root.finishCancelledBridge()
-      else root.finishBridge()
     }
   }
 
@@ -1606,7 +1497,7 @@ Item {
       root.activeWindowExited = false
       root.activeWindowHandled = false
       root.activeWindowExitCode = -1
-      activeWindowProc.command = root.boundedCommand(root.activeWindowByteCap, ["hyprctl", "activewindow", "-j"])
+      activeWindowProc.command = root.boundedCommand(root.activeWindowByteCap, root.captureTimeoutMs, ["hyprctl", "activewindow", "-j"])
       activeWindowProc.running = false
       activeWindowProc.running = true
     }
@@ -1732,10 +1623,6 @@ Item {
       return root.setCleanupProfile(value)
     }
 
-    function speakRequest(token: string): string {
-      return root.speakRequest(token)
-    }
-
     function status(): string {
       return root.statusJson()
     }
@@ -1747,16 +1634,16 @@ Item {
     root.settingsExited = false
     root.settingsReadHandled = false
     root.settingsExitCode = -1
-    // Settings are read before setupReady, so use a system utility rather
-    // than the plugin's runtime helper.  The producer itself is capped.
-    settingsReadProc.command = ["head", "-c", "4097", "--", root.settingsPath]
+    // Settings are read before setupReady, so use system Python rather than
+    // the optional Piper environment. The helper rejects symlinks, FIFOs,
+    // non-private files, and content over 4 KiB before QML collection.
+    settingsReadProc.command = ["python3", root.settingsStorePath, "read", root.settingsPath]
     settingsReadProc.running = true
     root.probeSetup()
   }
 
   Component.onDestruction: {
     root.cancelOcr()
-    root.cancelBridge()
     root.cancelVoiceManager()
     root.cancelCapture(true)
     if (workerProc.running) root.writeWorkerCommand({ command: "shutdown" })
