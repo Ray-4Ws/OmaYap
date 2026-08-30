@@ -98,33 +98,16 @@ BarWidget {
     return Math.max(0.5, Math.min(2.0, number))
   }
 
-  function commitSpeed() {
-    var raw = speedValue.text.trim()
-    var current = root.speed
-    var typed = raw === "" ? current : root.boundedSpeed(raw, current)
-    if (root.readAloud && typed !== current) root.readAloud.setSpeed(typed)
-    speedSlider.liveValue = typed
-    speedValue.text = root.formatSpeed(typed)
-    speedValue.deselect()
-  }
-
   function setPresetSpeed(value) {
     var typed = root.boundedSpeed(value, root.speed)
     if (root.readAloud && typed !== root.speed) root.readAloud.setSpeed(typed)
     speedSlider.liveValue = typed
-    speedValue.text = root.formatSpeed(typed)
   }
 
   function cleanupProfileLabel(value) {
     if (value === "off") return "Off"
     if (value === "article") return "Article"
     return "Safe"
-  }
-
-  function cleanupProfileDescription(value) {
-    if (value === "off") return "Line endings and Unicode normalization only."
-    if (value === "article") return "Safe cleanup plus conservative citation markers."
-    return "Cleans spacing and controls while preserving language marks."
   }
 
   function cleanupProfileTooltip(value) {
@@ -174,7 +157,6 @@ BarWidget {
     return 0.5 + Math.round((number - 0.5) / 0.25) * 0.25
   }
 
-  onSpeedChanged: if (speedValue && !speedValue.activeFocus) speedValue.text = root.formatSpeed(root.speed)
   onVoiceNameChanged: if (voiceDropdown) voiceDropdown.value = root.voiceName
 
   function clickAction() {
@@ -206,23 +188,10 @@ BarWidget {
     bar: root.bar
     owner: root
     open: root.popupOpen
-    // PopupWindow does not accept keyboard focus by default.  Grab it while
-    // open so the custom speed field can receive clicks and key events.
+    // Let keyboard-driven controls such as the voice dropdown receive focus.
     grabFocus: root.popupOpen
     contentWidth: popup.fittedContentWidth(Style.space(330))
     contentHeight: popup.fittedContentHeight(column.implicitHeight)
-
-    onOpenChanged: {
-      if (!open) return
-      // The popup is an xdg-popup and may not have mapped its child field yet.
-      // Focus on the next Qt turn, then select the value so typing replaces it.
-      Qt.callLater(function() {
-        if (popup.open) {
-          speedValue.forceActiveFocus()
-          speedValue.selectAll()
-        }
-      })
-    }
 
     Column {
       id: column
@@ -333,60 +302,6 @@ BarWidget {
           }
         }
 
-        Row {
-          width: parent.width
-          spacing: Style.space(6)
-
-          Text {
-            text: "Custom"
-            color: root.bar ? root.bar.foreground : Color.foreground
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.bodySmall
-            anchors.verticalCenter: parent.verticalCenter
-          }
-
-          TextField {
-            id: speedValue
-            text: root.formatSpeed(root.speed)
-            placeholderText: "1.10"
-            foreground: root.bar ? root.bar.foreground : Color.foreground
-            accent: root.bar ? root.bar.barForeground : Color.accent
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.bodySmall
-            width: Style.space(64)
-            implicitHeight: Style.spacing.controlHeight
-            horizontalAlignment: Text.AlignRight
-            anchors.verticalCenter: parent.verticalCenter
-            activeFocusOnPress: true
-            selectByMouse: true
-            inputMethodHints: Qt.ImhFormattedNumbersOnly
-            onActiveFocusChanged: {
-              if (activeFocus) selectAll()
-              else root.commitSpeed()
-            }
-            onAccepted: root.commitSpeed()
-            onEditingFinished: root.commitSpeed()
-          }
-
-          Text {
-            text: "×"
-            color: root.bar ? root.bar.foreground : Color.foreground
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.bodySmall
-            anchors.verticalCenter: parent.verticalCenter
-          }
-
-          Button {
-            text: "Apply"
-            foreground: root.bar ? root.bar.foreground : Color.foreground
-            accent: root.bar ? root.bar.barForeground : Color.accent
-            fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-            fontSize: Style.font.bodySmall
-            horizontalPadding: Style.space(8)
-            verticalPadding: Style.space(3)
-            onClicked: root.commitSpeed()
-          }
-        }
       }
 
       Column {
@@ -424,15 +339,6 @@ BarWidget {
               onClicked: root.setCleanupProfile(modelData)
             }
           }
-        }
-
-        Text {
-          text: root.cleanupProfileDescription(root.cleanupProfile)
-          color: Color.muted
-          font.family: root.bar ? root.bar.fontFamily : Style.font.family
-          font.pixelSize: Style.font.caption
-          width: parent.width
-          wrapMode: Text.WordWrap
         }
       }
 
