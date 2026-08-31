@@ -16,7 +16,7 @@ Item {
   readonly property int workerProtocolVersion: 1
   readonly property int maxWorkerRequestIdChars: 128
   readonly property string defaultVoiceName: "en_US-lessac-medium"
-  readonly property var supportedVoiceIds: ["en_US-lessac-medium", "en_US-kristin-medium", "en_US-john-medium", "en_GB-alba-medium"]
+  readonly property var supportedVoiceIds: ["en_US-lessac-medium", "en_US-lessac-high", "en_US-kristin-medium", "en_US-john-medium", "en_GB-alba-medium", "en_GB-cori-high", "en_US-ljspeech-high", "en_US-ryan-high"]
   // The selected ID and paths are mutable only through validated manager
   // metadata. They are kept as explicit properties so a worker replacement
   // observes one consistent model/config pair.
