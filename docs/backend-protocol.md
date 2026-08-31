@@ -73,8 +73,10 @@ meaningful tab/newline whitespace, removes soft hyphen, zero-width space,
 word joiner, and BOM, and normalizes speech-hostile Unicode punctuation to
 prosody-preserving ASCII pauses, quotes, and brackets rather than letting Piper
 spell Unicode escapes. Literal `\\uNNNN` and `\\UNNNNNNNN` sequences are decoded
-only when they represent punctuation; arbitrary escapes remain unchanged. It
-also collapses excessive whitespace. It preserves
+only when they represent cleanup-supported punctuation or non-ASCII symbols;
+arbitrary escapes remain unchanged. It
+also converts real and literal `\\n`, `\\r`, `\\r\\n`, and Unicode newline
+escapes into sentence pauses, then collapses excessive whitespace. It preserves
 ZWNJ, ZWJ, bidi marks/isolates, combining marks, and variation selectors. `article`
 adds conservative removal of adjacent MediaWiki-style numeric, note, and
 `citation needed` markers; it does not remove arbitrary bracketed prose,

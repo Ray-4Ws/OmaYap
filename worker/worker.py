@@ -82,7 +82,20 @@ _SPEECH_PUNCTUATION_REPLACEMENTS = {
     "\u3001": ",",
     "\u3002": ".",
 }
+_SPEECH_SYMBOL_REPLACEMENTS = {
+    "\u2190": ", ",
+    "\u2191": ", ",
+    "\u2192": ", ",
+    "\u2193": ", ",
+    "\u2194": ", ",
+    "\u21d0": ", ",
+    "\u21d2": ", ",
+    "\u21d4": ", ",
+}
 _ESCAPED_UNICODE_RE = re.compile(r"\\(?:u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8}))")
+_ESCAPED_NEWLINE_RE = re.compile(
+    r"\\(?:r\\n|[nr]|u(?:000[aAdD]|202[89])|U0000(?:000[aAdD]|202[89]))"
+)
 _ARTICLE_NUMBER = r"\d+(?:\s*(?:[-–—]|to)\s*\d+|\s*,\s*\d+)*"
 _ARTICLE_CITATION_RE = re.compile(
     rf"(?P<space>[ \t]*)\[(?P<body>(?:{_ARTICLE_NUMBER}|notes?\s+{_ARTICLE_NUMBER}|citation\s+needed))\]",
@@ -119,9 +132,12 @@ def _safe_cleanup(text: str) -> str:
     value = "".join(cleaned)
     value = re.sub(r" {2,}", " ", value)
     value = re.sub(r" +([,.;:!?])", r"\1", value)
-    value = re.sub(r" *\n *", "\n", value)
-    value = re.sub(r"\n{3,}", "\n\n", value)
-    return value.strip(" \n")
+    value = re.sub(r" *\n+ *", "\n", value).strip(" \n")
+    # Piper's phonemizer can produce garbled audio when given literal line
+    # breaks. Convert each selected-text line into a natural sentence pause.
+    value = re.sub(r"(?<=[.!?])\n", " ", value)
+    value = re.sub(r"(?<![.!?])\n", ". ", value)
+    return value.strip(" ")
 
 
 def _article_citation_is_adjacent(value: str, match: re.Match[str]) -> bool:
@@ -200,6 +216,10 @@ def _speech_punctuation_cleanup(value: str) -> str:
     cleaned: list[str] = []
     for character in value:
         replacement = _SPEECH_PUNCTUATION_REPLACEMENTS.get(character)
+        if replacement is None:
+            replacement = _SPEECH_SYMBOL_REPLACEMENTS.get(character)
+        if replacement is None and "ARROW" in unicodedata.name(character, ""):
+            replacement = ", "
         if replacement is not None:
             cleaned.append(replacement)
         elif not character.isascii() and unicodedata.category(character).startswith("P"):
@@ -214,13 +234,17 @@ def _speech_punctuation_cleanup(value: str) -> str:
                 cleaned.append(", ")
             else:
                 cleaned.append(", ")
+        elif not character.isascii() and unicodedata.category(character).startswith("S"):
+            # A Piper voice can spell unknown symbols (currency, math,
+            # dingbats, and emoji) as Unicode names or emit garbled audio.
+            cleaned.append(", ")
         else:
             cleaned.append(character)
     return "".join(cleaned)
 
 
-def _decode_escaped_punctuation(value: str) -> str:
-    """Decode only literal Unicode escapes that represent punctuation."""
+def _decode_escaped_speech_characters(value: str) -> str:
+    """Decode only literal Unicode escapes that require speech cleanup."""
 
     def replace(match: re.Match[str]) -> str:
         codepoint = int(match.group(1) or match.group(2), 16)
@@ -229,11 +253,21 @@ def _decode_escaped_punctuation(value: str) -> str:
         character = chr(codepoint)
         if character in _SPEECH_PUNCTUATION_REPLACEMENTS:
             return character
-        if unicodedata.category(character).startswith("P"):
+        if character in _SPEECH_SYMBOL_REPLACEMENTS:
+            return character
+        if "ARROW" in unicodedata.name(character, ""):
+            return character
+        if unicodedata.category(character).startswith(("P", "S")):
             return character
         return match.group(0)
 
     return _ESCAPED_UNICODE_RE.sub(replace, value)
+
+
+def _decode_escaped_newlines(value: str) -> str:
+    """Restore literal newline escapes emitted by browser selection paths."""
+
+    return _ESCAPED_NEWLINE_RE.sub("\n", value)
 
 
 def _article_cleanup(text: str) -> str:
@@ -263,7 +297,7 @@ def cleanup_text(text: str, profile: str = DEFAULT_CLEANUP_PROFILE) -> str:
     normalized = normalize_text(text)
     if profile == "off":
         return normalized
-    normalized = _decode_escaped_punctuation(normalized)
+    normalized = _decode_escaped_newlines(_decode_escaped_speech_characters(normalized))
     if profile == "article":
         normalized = _article_cleanup(normalized)
     return _safe_cleanup(_speech_punctuation_cleanup(normalized))

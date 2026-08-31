@@ -186,14 +186,28 @@ class WorkerTests(unittest.TestCase):
         raw = "A\u00a0\u2007  B\u2028C\x01D\x85E\u00adF\u200bG\u2060H\ufeffI\u200c\u200d\u202e\ufe0f"
         self.assertEqual(
             cleanup_text(raw, "safe"),
-            "A B\nCDEFGHI\u200c\u200d\u202e\ufe0f",
+            "A B. CDEFGHI\u200c\u200d\u202e\ufe0f",
         )
         self.assertEqual(cleanup_text("A\u00a0B\u00adC\r\nD", "off"), "A\u00a0B\u00adC\nD")
         self.assertEqual(cleanup_text("one—two – three", "safe"), "one, two, three")
         self.assertEqual(
-            cleanup_text(r"one \u2014 two \u0061 \U00002014 three", "safe"),
-            r"one, two \u0061, three",
+            cleanup_text(r"one \u2014 two \u0061 \U00002014 three \u2192 four", "safe"),
+            r"one, two \u0061, three, four",
         )
+        self.assertEqual(cleanup_text("Before→after", "safe"), "Before, after")
+        self.assertEqual(
+            cleanup_text(r"Before↗after↪then⟶next➜done \u21aa finished", "safe"),
+            "Before, after, then, next, done, finished",
+        )
+        self.assertEqual(
+            cleanup_text(r"One € two ★ three ∑ four 🙂 five \u20ac six", "safe"),
+            "One, two, three, four, five, six",
+        )
+        self.assertEqual(
+            cleanup_text(r"First\nSecond\r\nThird\u000AFourth\U00002028Fifth", "safe"),
+            "First. Second. Third. Fourth. Fifth",
+        )
+        self.assertEqual(cleanup_text(r"First\nSecond", "off"), r"First\nSecond")
         self.assertEqual(
             cleanup_text("“It’s ready…” — really※ yes。 ¡Hello! ¿Ready?", "safe"),
             '"It\'s ready...", really, yes. Hello. Ready?',
