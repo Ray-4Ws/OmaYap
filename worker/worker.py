@@ -46,6 +46,8 @@ MAX_SPEED = 2.0
 DEFAULT_SPEED = 1.0
 VOICE_NAME = "en_US-lessac-medium"
 CHUNK_TARGET = 800
+LINE_PAUSE_MS = 400
+PARAGRAPH_PAUSE_MS = 900
 PROTOCOL_VERSION = 1
 MAX_REQUEST_ID_CHARS = 128
 CLEANUP_PROFILES = ("off", "safe", "article")
@@ -186,11 +188,10 @@ def _safe_cleanup(text: str) -> str:
     value = "".join(cleaned)
     value = re.sub(r" {2,}", " ", value)
     value = re.sub(r" +([,.;:!?])", r"\1", value)
-    value = re.sub(r" *\n+ *", "\n", value).strip(" \n")
-    # Piper's phonemizer can produce garbled audio when given literal line
-    # breaks. Convert each selected-text line into a natural sentence pause.
-    value = re.sub(r"(?<=[.!?])\n", " ", value)
-    value = re.sub(r"(?<![.!?])\n", ". ", value)
+    value = re.sub(r" *(\n+) *", r"\1", value).strip(" \n")
+    # Keep structural line breaks until synthesis. The worker splits on them
+    # so Piper never receives speech-hostile literal newlines, then inserts a
+    # deterministic PCM pause that does not depend on voice prosody.
     return value.strip(" ")
 
 
@@ -409,6 +410,19 @@ def sentence_chunks(text: str, target: int = CHUNK_TARGET) -> Iterator[str]:
         if chunk:
             yield chunk
         start = max(end, start + 1)
+
+
+def _line_chunks(text: str, target: int) -> Iterator[tuple[str, int]]:
+    """Yield synthesis chunks with the pause before each new line."""
+
+    pause_ms = 0
+    for index, part in enumerate(re.split(r"(\n+)", text)):
+        if index % 2:
+            pause_ms = LINE_PAUSE_MS if len(part) == 1 else PARAGRAPH_PAUSE_MS
+            continue
+        for chunk in sentence_chunks(part, target=target):
+            yield chunk, pause_ms
+            pause_ms = 0
 
 
 def _load_piper_voice(
@@ -848,7 +862,9 @@ class Worker:
             self._characters = actual
             self._error_code = ""
         self._emit("loading")
-        thread = threading.Thread(target=self._speak, args=(generation, text), daemon=True)
+        thread = threading.Thread(
+            target=self._speak, args=(generation, text, cleanup_profile), daemon=True
+        )
         with self._lock:
             self._thread = thread
         thread.start()
@@ -998,7 +1014,7 @@ class Worker:
         config = getattr(voice, "config", None)
         return int(getattr(config, "sample_rate", 22_050))
 
-    def _speak(self, generation: int, text: str) -> None:
+    def _speak(self, generation: int, text: str, cleanup_profile: str) -> None:
         sink: Optional[AudioSink] = None
         completed = False
         try:
@@ -1017,15 +1033,24 @@ class Worker:
                 return
             self._emit_generation(generation, "speaking")
             first_audio = True
-            for chunk in sentence_chunks(text, target=self._chunk_target):
+            last_sample_rate = None
+            chunks = (
+                ((chunk, 0) for chunk in sentence_chunks(text, target=self._chunk_target))
+                if cleanup_profile == "off"
+                else _line_chunks(text, self._chunk_target)
+            )
+            for chunk, pause_ms in chunks:
                 if not self._active(generation):
                     return
+                if pause_ms and last_sample_rate is not None:
+                    silent_frames = max(1, last_sample_rate * pause_ms // 1000)
+                    sink.write(bytes(silent_frames * 2), last_sample_rate)
                 with self._lock:
                     speed = self._speed
                 config = _synthesis_config(speed)
                 # Piper's generator performs the actual ONNX inference while
                 # it is iterated, so hold this lock across both construction
-                # and iteration.  A canceled generation can still finish its
+                # and iteration. A canceled generation can still finish its
                 # current inference, but a replacement cannot overlap it.
                 with self._synthesis_lock:
                     if not self._active(generation):
@@ -1041,7 +1066,8 @@ class Worker:
                             return
                         data = self._audio_bytes(audio)
                         if data:
-                            sink.write(data, self._sample_rate(audio, voice))
+                            last_sample_rate = self._sample_rate(audio, voice)
+                            sink.write(data, last_sample_rate)
                             if first_audio and self._active(generation):
                                 first_audio = False
                                 # This remains metadata-only and allows the
