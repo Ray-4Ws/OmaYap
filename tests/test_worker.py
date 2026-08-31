@@ -29,6 +29,8 @@ from benchmarks.memory import (
 from worker.worker import (
     AudioSink,
     DiscardAudioSink,
+    LINE_PAUSE_MS,
+    PARAGRAPH_PAUSE_MS,
     MAX_CHARS,
     CLEANUP_PROFILES,
     DEFAULT_CLEANUP_PROFILE,
@@ -186,7 +188,7 @@ class WorkerTests(unittest.TestCase):
         raw = "A\u00a0\u2007  B\u2028C\x01D\x85E\u00adF\u200bG\u2060H\ufeffI\u200c\u200d\u202e\ufe0f"
         self.assertEqual(
             cleanup_text(raw, "safe"),
-            "A B. CDEFGHI\u200c\u200d\u202e\ufe0f",
+            "A B\nCDEFGHI\u200c\u200d\u202e\ufe0f",
         )
         self.assertEqual(cleanup_text("A\u00a0B\u00adC\r\nD", "off"), "A\u00a0B\u00adC\nD")
         self.assertEqual(cleanup_text("one—two – three", "safe"), "one, two, three")
@@ -205,7 +207,11 @@ class WorkerTests(unittest.TestCase):
         )
         self.assertEqual(
             cleanup_text(r"First\nSecond\r\nThird\u000AFourth\U00002028Fifth", "safe"),
-            "First. Second. Third. Fourth. Fifth",
+            "First\nSecond\nThird\nFourth\nFifth",
+        )
+        self.assertEqual(
+            cleanup_text("Sentence one.\nSentence two.\n\nNew paragraph.", "article"),
+            "Sentence one.\nSentence two.\n\nNew paragraph.",
         )
         self.assertEqual(cleanup_text(r"First\nSecond", "off"), r"First\nSecond")
         self.assertEqual(
@@ -280,6 +286,22 @@ class WorkerTests(unittest.TestCase):
         wait_for(lambda: any(e.get("status") == "idle" and e.get("characters") == 0 for e in events))
         self.assertGreaterEqual(len(voice.calls), 2)
         self.assertEqual(voice.calls[0][1].get("length_scale"), 1.0)
+        self.assertTrue(any(e.get("audioStarted") is True for e in events))
+
+    def test_newlines_insert_deterministic_line_and_paragraph_silence(self):
+        worker, voice, sink, events = self.make_worker()
+        worker.read_selection("First line.\nSecond line.\n\nThird paragraph.", cleanup_profile="article")
+        wait_for(lambda: sink.finished)
+
+        self.assertEqual([call[0] for call in voice.calls], [
+            "First line.",
+            "Second line.",
+            "Third paragraph.",
+        ])
+        sample_rate = FakeAudio.sample_rate
+        self.assertEqual(len(sink.writes), 5)
+        self.assertEqual(len(sink.writes[1]), sample_rate * LINE_PAUSE_MS // 1000 * 2)
+        self.assertEqual(len(sink.writes[3]), sample_rate * PARAGRAPH_PAUSE_MS // 1000 * 2)
         self.assertTrue(any(e.get("audioStarted") is True for e in events))
 
     def test_chunk_target_is_configurable_for_benchmarking(self):

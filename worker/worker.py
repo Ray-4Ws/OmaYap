@@ -29,6 +29,8 @@ MAX_SPEED = 2.0
 DEFAULT_SPEED = 1.0
 VOICE_NAME = "en_US-lessac-medium"
 CHUNK_TARGET = 800
+LINE_PAUSE_MS = 400
+PARAGRAPH_PAUSE_MS = 900
 PROTOCOL_VERSION = 1
 MAX_REQUEST_ID_CHARS = 128
 CLEANUP_PROFILES = ("off", "safe", "article")
@@ -132,11 +134,10 @@ def _safe_cleanup(text: str) -> str:
     value = "".join(cleaned)
     value = re.sub(r" {2,}", " ", value)
     value = re.sub(r" +([,.;:!?])", r"\1", value)
-    value = re.sub(r" *\n+ *", "\n", value).strip(" \n")
-    # Piper's phonemizer can produce garbled audio when given literal line
-    # breaks. Convert each selected-text line into a natural sentence pause.
-    value = re.sub(r"(?<=[.!?])\n", " ", value)
-    value = re.sub(r"(?<![.!?])\n", ". ", value)
+    value = re.sub(r" *(\n+) *", r"\1", value).strip(" \n")
+    # Keep structural line breaks until synthesis. The worker splits on them
+    # so Piper never receives speech-hostile literal newlines, then inserts a
+    # deterministic PCM pause that does not depend on voice prosody.
     return value.strip(" ")
 
 
@@ -839,37 +840,52 @@ class Worker:
                 self._sink = sink
             self._emit("speaking")
             first_audio = True
-            for chunk in sentence_chunks(text, target=self._chunk_target):
-                if not self._active(generation):
-                    return
-                with self._lock:
-                    speed = self._speed
-                config = _synthesis_config(speed)
-                # Piper's generator performs the actual ONNX inference while
-                # it is iterated, so hold this lock across both construction
-                # and iteration.  A canceled generation can still finish its
-                # current inference, but a replacement cannot overlap it.
-                with self._synthesis_lock:
+            parts = re.split(r"(\n+)", text)
+            last_sample_rate = 22_050
+            for part_index in range(0, len(parts), 2):
+                spoken_part = parts[part_index]
+                for chunk in sentence_chunks(spoken_part, target=self._chunk_target):
                     if not self._active(generation):
                         return
-                    try:
-                        generated: Iterable[Any] = voice.synthesize(chunk, syn_config=config)
-                    except TypeError:
-                        # Small fake voices and older Piper releases may expose a
-                        # positional-only synthesis config.
-                        generated = voice.synthesize(chunk, config)
-                    for audio in generated:
+                    with self._lock:
+                        speed = self._speed
+                    config = _synthesis_config(speed)
+                    # Piper's generator performs the actual ONNX inference while
+                    # it is iterated, so hold this lock across both construction
+                    # and iteration. A canceled generation can still finish its
+                    # current inference, but a replacement cannot overlap it.
+                    with self._synthesis_lock:
                         if not self._active(generation):
                             return
-                        data = self._audio_bytes(audio)
-                        if data:
-                            sink.write(data, self._sample_rate(audio, voice))
-                            if first_audio and self._active(generation):
-                                first_audio = False
-                                # This remains metadata-only and allows the
-                                # benchmark to distinguish Piper's first audio
-                                # from the earlier "speaking" state.
-                                self._emit("speaking", audioStarted=True)
+                        try:
+                            generated: Iterable[Any] = voice.synthesize(chunk, syn_config=config)
+                        except TypeError:
+                            # Small fake voices and older Piper releases may expose a
+                            # positional-only synthesis config.
+                            generated = voice.synthesize(chunk, config)
+                        for audio in generated:
+                            if not self._active(generation):
+                                return
+                            data = self._audio_bytes(audio)
+                            if data:
+                                last_sample_rate = self._sample_rate(audio, voice)
+                                sink.write(data, last_sample_rate)
+                                if first_audio and self._active(generation):
+                                    first_audio = False
+                                    # This remains metadata-only and allows the
+                                    # benchmark to distinguish Piper's first audio
+                                    # from the earlier "speaking" state.
+                                    self._emit("speaking", audioStarted=True)
+
+                boundary_index = part_index + 1
+                if boundary_index < len(parts) and not first_audio:
+                    pause_ms = (
+                        LINE_PAUSE_MS
+                        if len(parts[boundary_index]) == 1
+                        else PARAGRAPH_PAUSE_MS
+                    )
+                    silent_frames = max(1, last_sample_rate * pause_ms // 1000)
+                    sink.write(bytes(silent_frames * 2), last_sample_rate)
             if self._active(generation):
                 completed = True
         except RuntimeError as exc:
