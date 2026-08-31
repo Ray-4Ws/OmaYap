@@ -247,7 +247,7 @@ prepare_runtime() {
     local test_source="$DATA_ROOT/test-fixtures"
     ensure_private_dir "$test_source"
     local test_voice=""
-    for test_voice in en_US-lessac-medium en_US-kristin-medium en_US-john-medium en_GB-alba-medium; do
+    for test_voice in en_US-lessac-medium en_US-lessac-high en_US-kristin-medium en_US-john-medium en_GB-alba-medium en_GB-cori-high en_US-ljspeech-high en_US-ryan-high; do
       printf 'test model %s\n' "$test_voice" >"$test_source/$test_voice.onnx"
       printf '{}\n' >"$test_source/$test_voice.onnx.json"
       printf 'test model card %s\n' "$test_voice" >"$test_source/$test_voice.MODEL_CARD"
