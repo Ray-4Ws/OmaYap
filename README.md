@@ -64,8 +64,9 @@ read starts a fresh worker with the saved speed.
 - Left-click the bar icon to read the selection, or to stop active playback.
 - Hover over the bar icon for its current status and left/right-click actions.
   Right-click it for the voice selector, character count, and the
-  `0.5×–2.0×` speed slider. The voice dropdown contains the four checked-in
-  official Piper choices: Lessac, Kristin, John, and Alba. It shows each
+  `0.5×–2.0×` speed slider. The voice dropdown contains eight checked-in
+  official Piper choices: the four existing Medium voices plus every compatible
+  single-speaker English High voice (Cori, Lessac, LJSpeech, and Ryan). It shows each
   voice's US/UK region, medium quality, and approximate download size. Choosing
   an uninstalled voice downloads its three files, verifies their pinned sizes
   and SHA-256 checks, and selects it automatically. The selected voice is
@@ -75,7 +76,9 @@ read starts a fresh worker with the saved speed.
   seconds. Speed changes are persisted in
   `~/.config/omayap-read-aloud/settings.json` and affect the next chunk. The
   same popup selects the reading cleanup profile: **Safe** (the default),
-  **Off**, or **Article**.
+  **Off**, or **Article**. Safe normalizes speech-hostile Unicode punctuation
+  to Piper-friendly punctuation that retains natural pauses; Article applies
+  the same normalization and also removes conservative citation markers.
 - Use **Ctrl+F10** or the bar popup's **Read text from screen (OCR)** action to
   run Omarchy's installed local screen-text capture. It does not modify
   CLIPBOARD; the native OCR language setting is inherited from
@@ -156,13 +159,17 @@ marketplace. OCR remains local to Omarchy's installed capture tools; it does
 not upload screenshots or recognized text. The checked-in catalog and its
 official links are in [`share/voices.json`](share/voices.json). The voice
 files are distributed by the official [Piper voice repository](https://huggingface.co/rhasspy/piper-voices).
-For clear attribution and terms disclosure, the four shipped choices link to
+For clear attribution and terms disclosure, the eight shipped choices link to
 their official model cards and dataset terms here:
 
 - [Lessac medium model card](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/lessac/medium/MODEL_CARD) · [Blizzard Challenge 2013 license](https://www.cstr.ed.ac.uk/projects/blizzard/2013/lessac_blizzard2013/license.html)
+- [Lessac high model card](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/lessac/high/MODEL_CARD) · [Blizzard Challenge 2013 license](https://www.cstr.ed.ac.uk/projects/blizzard/2013/lessac_blizzard2013/license.html)
 - [Kristin medium model card](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/kristin/medium/MODEL_CARD) · [LibriVox public-domain terms](https://librivox.org)
 - [John medium model card](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/john/medium/MODEL_CARD) · [LibriVox public-domain terms](https://librivox.org)
 - [Alba medium model card](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_GB/alba/medium/MODEL_CARD) · [Creative Commons Attribution 4.0 terms](https://creativecommons.org/licenses/by/4.0/)
+- [Cori high model card](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_GB/cori/high/MODEL_CARD) · [LibriVox public-domain terms](https://librivox.org)
+- [LJSpeech high model card](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/ljspeech/high/MODEL_CARD) · [LJ Speech public-domain terms](https://keithito.com/LJ-Speech-Dataset/)
+- [Ryan high model card](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/ryan/high/MODEL_CARD) · [Creative Commons BY-NC-SA 4.0 terms](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
 Piper's runtime documentation is available in the official
 [OHF-Voice/piper1-gpl repository](https://github.com/OHF-Voice/piper1-gpl).

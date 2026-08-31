@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "catalogVersion": "1.5.0",
+  "catalogVersion": "1.6.0",
   "defaultVoice": "en_US-lessac-medium",
   "voices": [
     {
@@ -19,6 +19,25 @@
       "cardSha256": "ce49eb457742208166d399a40cdec2c7fa9db77960930031564ab56f12882645",
       "configSizeBytes": 4885,
       "cardSizeBytes": 351,
+      "termsLabel": "Blizzard Challenge 2013 license",
+      "termsUrl": "https://www.cstr.ed.ac.uk/projects/blizzard/2013/lessac_blizzard2013/license.html"
+    },
+    {
+      "id": "en_US-lessac-high",
+      "label": "Lessac",
+      "language": "English",
+      "region": "US",
+      "quality": "high",
+      "sizeBytes": 113895201,
+      "modelUrl": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/high/en_US-lessac-high.onnx",
+      "configUrl": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/high/en_US-lessac-high.onnx.json",
+      "cardDownloadUrl": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/high/MODEL_CARD",
+      "modelCardUrl": "https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/lessac/high/MODEL_CARD",
+      "modelSha256": "4cabf7c3a638017137f34a1516522032d4fe3f38228a843cc9b764ddcbcd9e09",
+      "configSha256": "db42b97d9859f257bc1561b8ed980e7fb2398402050a74ddd6cbec931a92412f",
+      "cardSha256": "7671826d947a0ffc11dd76af0bd890d93e956b00358696ad71348f21aa827100",
+      "configSizeBytes": 4883,
+      "cardSizeBytes": 347,
       "termsLabel": "Blizzard Challenge 2013 license",
       "termsUrl": "https://www.cstr.ed.ac.uk/projects/blizzard/2013/lessac_blizzard2013/license.html"
     },
@@ -78,6 +97,63 @@
       "cardSizeBytes": 324,
       "termsLabel": "Creative Commons Attribution 4.0",
       "termsUrl": "https://creativecommons.org/licenses/by/4.0/"
+    },
+    {
+      "id": "en_GB-cori-high",
+      "label": "Cori",
+      "language": "English",
+      "region": "UK",
+      "quality": "high",
+      "sizeBytes": 114219352,
+      "modelUrl": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/cori/high/en_GB-cori-high.onnx",
+      "configUrl": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/cori/high/en_GB-cori-high.onnx.json",
+      "cardDownloadUrl": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/cori/high/MODEL_CARD",
+      "modelCardUrl": "https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_GB/cori/high/MODEL_CARD",
+      "modelSha256": "470b4dd634c98f8a4850d7626ffc3dfc90774628eeef6605a6dd8f88f30a5903",
+      "configSha256": "9e7fb5b5671612c22f3c81cbe46c1ae87b031a4632bcb509e499dad6f1e2adec",
+      "cardSha256": "136e7bd168b6c35b4a5df01a0253297e5773b5775ceae0af5160f264aa58208f",
+      "configSizeBytes": 4963,
+      "cardSizeBytes": 468,
+      "termsLabel": "LibriVox public-domain terms",
+      "termsUrl": "https://librivox.org"
+    },
+    {
+      "id": "en_US-ljspeech-high",
+      "label": "LJSpeech",
+      "language": "English",
+      "region": "US",
+      "quality": "high",
+      "sizeBytes": 114199011,
+      "modelUrl": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ljspeech/high/en_US-ljspeech-high.onnx",
+      "configUrl": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ljspeech/high/en_US-ljspeech-high.onnx.json",
+      "cardDownloadUrl": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ljspeech/high/MODEL_CARD",
+      "modelCardUrl": "https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/ljspeech/high/MODEL_CARD",
+      "modelSha256": "5d4f08ba6a2a48c44592eed3ce56bf85e9de3dd4e20df90541ae68a8310c029a",
+      "configSha256": "7e1f4634af596d83cca997fb7a931ba80b70f8a316a2655ee69c55365e0ace14",
+      "cardSha256": "289f7421072d689a3d91f6c632f486af46f9b8b04417536104a4ea667b8a394b",
+      "configSizeBytes": 4970,
+      "cardSizeBytes": 513,
+      "termsLabel": "LJ Speech public-domain terms",
+      "termsUrl": "https://keithito.com/LJ-Speech-Dataset/"
+    },
+    {
+      "id": "en_US-ryan-high",
+      "label": "Ryan",
+      "language": "English",
+      "region": "US",
+      "quality": "high",
+      "sizeBytes": 120786792,
+      "modelUrl": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/en_US-ryan-high.onnx",
+      "configUrl": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/en_US-ryan-high.onnx.json",
+      "cardDownloadUrl": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/MODEL_CARD",
+      "modelCardUrl": "https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/ryan/high/MODEL_CARD",
+      "modelSha256": "b3990d7606e183ec8dbfba70a4607074f162de1a0c412e0180d1ff60bb154eca",
+      "configSha256": "c6d3b98f08315cb4bebf0d49d50fc4ff491b503c64b940cd3d5ca28543b48011",
+      "cardSha256": "7c3b337dd4e96c3f311f476118b15d93867aefa4bee54263e250c45f759fad0d",
+      "configSizeBytes": 4166,
+      "cardSizeBytes": 265,
+      "termsLabel": "Creative Commons BY-NC-SA 4.0",
+      "termsUrl": "https://creativecommons.org/licenses/by-nc-sa/4.0/"
     }
   ]
 }

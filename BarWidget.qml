@@ -112,7 +112,7 @@ BarWidget {
   function cleanupProfileTooltip(value) {
     if (value === "off") return "Minimal cleanup\nNormalizes line endings only."
     if (value === "article") return "Article cleanup\nAlso removes conservative citation markers."
-    return "Natural reading (recommended)\nCleans spacing and control characters."
+    return "Natural reading (recommended)\nCleans spacing, controls, and speech-hostile punctuation."
   }
 
   function setCleanupProfile(value) {
@@ -220,10 +220,15 @@ BarWidget {
         }
       }
 
-      Dropdown {
+      SearchableDropdown {
         id: voiceDropdown
         width: parent.width
         label: "Voice"
+        placeholderText: "Search voices..."
+        // Keep the nested picker comfortably inside OmaYap's settings card.
+        // The shorter viewport still scrolls through the complete catalog.
+        popupRowHeight: Style.space(22)
+        popupMinHeight: Style.space(170)
         value: root.voiceName
         options: root.voiceOptions
         foreground: root.bar ? root.bar.foreground : Color.foreground

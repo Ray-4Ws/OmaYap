@@ -29,6 +29,8 @@ MAX_SPEED = 2.0
 DEFAULT_SPEED = 1.0
 VOICE_NAME = "en_US-lessac-medium"
 CHUNK_TARGET = 800
+LINE_PAUSE_MS = 400
+PARAGRAPH_PAUSE_MS = 900
 PROTOCOL_VERSION = 1
 MAX_REQUEST_ID_CHARS = 128
 CLEANUP_PROFILES = ("off", "safe", "article")
@@ -56,6 +58,46 @@ def normalize_text(text: str) -> str:
 
 
 _REMOVED_SAFE_CHARACTERS = frozenset("\u00ad\u200b\u2060\ufeff")
+_SPEECH_PUNCTUATION_REPLACEMENTS = {
+    "!": ".",
+    "\u00a1": " ",
+    "\u00ab": '"',
+    "\u00bb": '"',
+    "\u00bf": " ",
+    "\u2010": ", ",
+    "\u2011": ", ",
+    "\u2012": ", ",
+    "\u2013": ", ",
+    "\u2014": ", ",
+    "\u2015": ", ",
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201a": "'",
+    "\u201b": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u201e": '"',
+    "\u201f": '"',
+    "\u2026": "...",
+    "\u2032": "'",
+    "\u2033": '"',
+    "\u3001": ",",
+    "\u3002": ".",
+}
+_SPEECH_SYMBOL_REPLACEMENTS = {
+    "\u2190": ", ",
+    "\u2191": ", ",
+    "\u2192": ", ",
+    "\u2193": ", ",
+    "\u2194": ", ",
+    "\u21d0": ", ",
+    "\u21d2": ", ",
+    "\u21d4": ", ",
+}
+_ESCAPED_UNICODE_RE = re.compile(r"\\(?:u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8}))")
+_ESCAPED_NEWLINE_RE = re.compile(
+    r"\\(?:r\\n|[nr]|u(?:000[aAdD]|202[89])|U0000(?:000[aAdD]|202[89]))"
+)
 _ARTICLE_NUMBER = r"\d+(?:\s*(?:[-–—]|to)\s*\d+|\s*,\s*\d+)*"
 _ARTICLE_CITATION_RE = re.compile(
     rf"(?P<space>[ \t]*)\[(?P<body>(?:{_ARTICLE_NUMBER}|notes?\s+{_ARTICLE_NUMBER}|citation\s+needed))\]",
@@ -91,9 +133,12 @@ def _safe_cleanup(text: str) -> str:
 
     value = "".join(cleaned)
     value = re.sub(r" {2,}", " ", value)
-    value = re.sub(r" *\n *", "\n", value)
-    value = re.sub(r"\n{3,}", "\n\n", value)
-    return value.strip(" \n")
+    value = re.sub(r" +([,.;:!?])", r"\1", value)
+    value = re.sub(r" *(\n+) *", r"\1", value).strip(" \n")
+    # Keep structural line breaks until synthesis. The worker splits on them
+    # so Piper never receives speech-hostile literal newlines, then inserts a
+    # deterministic PCM pause that does not depend on voice prosody.
+    return value.strip(" ")
 
 
 def _article_citation_is_adjacent(value: str, match: re.Match[str]) -> bool:
@@ -162,6 +207,70 @@ def _article_citation_is_adjacent(value: str, match: re.Match[str]) -> bool:
     return bool(token)
 
 
+def _speech_punctuation_cleanup(value: str) -> str:
+    """Make punctuation predictable for Piper without changing word text."""
+
+    # English Piper voices are most reliable with ASCII punctuation. Preserve
+    # prosody by mapping punctuation roles to pauses and structural ASCII,
+    # rather than simply deleting characters that the phonemizer may spell as
+    # Unicode escapes.
+    cleaned: list[str] = []
+    for character in value:
+        replacement = _SPEECH_PUNCTUATION_REPLACEMENTS.get(character)
+        if replacement is None:
+            replacement = _SPEECH_SYMBOL_REPLACEMENTS.get(character)
+        if replacement is None and "ARROW" in unicodedata.name(character, ""):
+            replacement = ", "
+        if replacement is not None:
+            cleaned.append(replacement)
+        elif not character.isascii() and unicodedata.category(character).startswith("P"):
+            category = unicodedata.category(character)
+            if category == "Ps":
+                cleaned.append("(")
+            elif category == "Pe":
+                cleaned.append(")")
+            elif category in {"Pi", "Pf"}:
+                cleaned.append('"')
+            elif category == "Pd":
+                cleaned.append(", ")
+            else:
+                cleaned.append(", ")
+        elif not character.isascii() and unicodedata.category(character).startswith("S"):
+            # A Piper voice can spell unknown symbols (currency, math,
+            # dingbats, and emoji) as Unicode names or emit garbled audio.
+            cleaned.append(", ")
+        else:
+            cleaned.append(character)
+    return "".join(cleaned)
+
+
+def _decode_escaped_speech_characters(value: str) -> str:
+    """Decode only literal Unicode escapes that require speech cleanup."""
+
+    def replace(match: re.Match[str]) -> str:
+        codepoint = int(match.group(1) or match.group(2), 16)
+        if codepoint > 0x10FFFF:
+            return match.group(0)
+        character = chr(codepoint)
+        if character in _SPEECH_PUNCTUATION_REPLACEMENTS:
+            return character
+        if character in _SPEECH_SYMBOL_REPLACEMENTS:
+            return character
+        if "ARROW" in unicodedata.name(character, ""):
+            return character
+        if unicodedata.category(character).startswith(("P", "S")):
+            return character
+        return match.group(0)
+
+    return _ESCAPED_UNICODE_RE.sub(replace, value)
+
+
+def _decode_escaped_newlines(value: str) -> str:
+    """Restore literal newline escapes emitted by browser selection paths."""
+
+    return _ESCAPED_NEWLINE_RE.sub("\n", value)
+
+
 def _article_cleanup(text: str) -> str:
     removed_citation = False
 
@@ -189,8 +298,10 @@ def cleanup_text(text: str, profile: str = DEFAULT_CLEANUP_PROFILE) -> str:
     normalized = normalize_text(text)
     if profile == "off":
         return normalized
-    cleaned = _safe_cleanup(normalized)
-    return _article_cleanup(cleaned) if profile == "article" else cleaned
+    normalized = _decode_escaped_newlines(_decode_escaped_speech_characters(normalized))
+    if profile == "article":
+        normalized = _article_cleanup(normalized)
+    return _safe_cleanup(_speech_punctuation_cleanup(normalized))
 
 
 def _sentence_boundary(text: str, start: int, end: int) -> int:
@@ -729,37 +840,52 @@ class Worker:
                 self._sink = sink
             self._emit("speaking")
             first_audio = True
-            for chunk in sentence_chunks(text, target=self._chunk_target):
-                if not self._active(generation):
-                    return
-                with self._lock:
-                    speed = self._speed
-                config = _synthesis_config(speed)
-                # Piper's generator performs the actual ONNX inference while
-                # it is iterated, so hold this lock across both construction
-                # and iteration.  A canceled generation can still finish its
-                # current inference, but a replacement cannot overlap it.
-                with self._synthesis_lock:
+            parts = re.split(r"(\n+)", text)
+            last_sample_rate = 22_050
+            for part_index in range(0, len(parts), 2):
+                spoken_part = parts[part_index]
+                for chunk in sentence_chunks(spoken_part, target=self._chunk_target):
                     if not self._active(generation):
                         return
-                    try:
-                        generated: Iterable[Any] = voice.synthesize(chunk, syn_config=config)
-                    except TypeError:
-                        # Small fake voices and older Piper releases may expose a
-                        # positional-only synthesis config.
-                        generated = voice.synthesize(chunk, config)
-                    for audio in generated:
+                    with self._lock:
+                        speed = self._speed
+                    config = _synthesis_config(speed)
+                    # Piper's generator performs the actual ONNX inference while
+                    # it is iterated, so hold this lock across both construction
+                    # and iteration. A canceled generation can still finish its
+                    # current inference, but a replacement cannot overlap it.
+                    with self._synthesis_lock:
                         if not self._active(generation):
                             return
-                        data = self._audio_bytes(audio)
-                        if data:
-                            sink.write(data, self._sample_rate(audio, voice))
-                            if first_audio and self._active(generation):
-                                first_audio = False
-                                # This remains metadata-only and allows the
-                                # benchmark to distinguish Piper's first audio
-                                # from the earlier "speaking" state.
-                                self._emit("speaking", audioStarted=True)
+                        try:
+                            generated: Iterable[Any] = voice.synthesize(chunk, syn_config=config)
+                        except TypeError:
+                            # Small fake voices and older Piper releases may expose a
+                            # positional-only synthesis config.
+                            generated = voice.synthesize(chunk, config)
+                        for audio in generated:
+                            if not self._active(generation):
+                                return
+                            data = self._audio_bytes(audio)
+                            if data:
+                                last_sample_rate = self._sample_rate(audio, voice)
+                                sink.write(data, last_sample_rate)
+                                if first_audio and self._active(generation):
+                                    first_audio = False
+                                    # This remains metadata-only and allows the
+                                    # benchmark to distinguish Piper's first audio
+                                    # from the earlier "speaking" state.
+                                    self._emit("speaking", audioStarted=True)
+
+                boundary_index = part_index + 1
+                if boundary_index < len(parts) and not first_audio:
+                    pause_ms = (
+                        LINE_PAUSE_MS
+                        if len(parts[boundary_index]) == 1
+                        else PARAGRAPH_PAUSE_MS
+                    )
+                    silent_frames = max(1, last_sample_rate * pause_ms // 1000)
+                    sink.write(bytes(silent_frames * 2), last_sample_rate)
             if self._active(generation):
                 completed = True
         except RuntimeError as exc:
