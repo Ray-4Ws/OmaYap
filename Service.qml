@@ -1762,6 +1762,10 @@ Item {
       return root.setCleanupProfile(value)
     }
 
+    function setBackend(value: string): string {
+      return root.setBackend(value)
+    }
+
     function status(): string {
       return root.statusJson()
     }
