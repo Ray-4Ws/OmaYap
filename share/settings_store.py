@@ -20,6 +20,7 @@ EXIT_IO = 74
 PRIVATE_DIRECTORY_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
 VALID_CLEANUP_PROFILES = {"off", "safe", "article"}
+VALID_BACKENDS = {"cpu", "hybrid", "gpu"}
 
 
 def _settings_path(raw: str) -> Path | None:
@@ -110,22 +111,33 @@ def _validated_payload() -> bytes | None:
         parsed = json.loads(raw.decode("utf-8", errors="strict"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
-    if not isinstance(parsed, dict) or set(parsed) != {"speed", "cleanupProfile"}:
+    if not isinstance(parsed, dict) or set(parsed) not in (
+        {"speed", "cleanupProfile"},
+        {"speed", "cleanupProfile", "backend"},
+    ):
         return None
     speed = parsed["speed"]
     profile = parsed["cleanupProfile"]
+    backend = parsed.get("backend", "cpu")
     if (
         isinstance(speed, bool)
         or not isinstance(speed, (int, float))
         or not math.isfinite(speed)
         or not 0.5 <= float(speed) <= 2.0
         or profile not in VALID_CLEANUP_PROFILES
+        or not isinstance(backend, str)
+        or backend not in VALID_BACKENDS
     ):
         return None
     canonical = {
         "speed": round(float(speed), 3),
         "cleanupProfile": profile,
     }
+    # Keep accepting and preserving the legacy two-field payload. OmaYap's
+    # current writer always includes backend, while older callers and files
+    # remain compatible and are interpreted by the service as CPU.
+    if "backend" in parsed:
+        canonical["backend"] = backend
     return (json.dumps(canonical, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
 
 

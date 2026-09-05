@@ -182,6 +182,44 @@ class WorkerTests(unittest.TestCase):
         )
         return worker, voice, sink, events
 
+    def test_default_backend_is_cpu_and_accelerator_import_stays_lazy(self):
+        worker, _voice, _sink, events = self.make_worker()
+        self.assertEqual(worker.backend, "cpu")
+        self.assertEqual(worker.status()["backend"], "cpu")
+        self.assertEqual(worker.status()["executionDevices"], ["CPU"])
+        self.assertFalse(any(event.get("backend") in {"hybrid", "gpu"} for event in events))
+
+    def test_accelerator_error_codes_are_preserved_as_fixed_metadata(self):
+        class FailingVoice:
+            def synthesize(self, _text: str, syn_config: Any = None):
+                del syn_config
+                raise RuntimeError("accelerator-output-invalid")
+                yield  # pragma: no cover
+
+        events: list[dict[str, Any]] = []
+        worker = Worker(
+            voice_loader=FailingVoice,
+            player_factory=FakeSink,
+            emitter=events.append,
+            backend="hybrid",
+        )
+        worker.read_selection("fixed error code")
+        wait_for(lambda: any(event.get("status") == "error" for event in events))
+        self.assertEqual(events[-1]["errorCode"], "accelerator-output-invalid")
+        self.assertEqual(events[-1]["backend"], "hybrid")
+
+    def test_accelerated_voice_metadata_is_published_after_lazy_load(self):
+        class FakeAcceleratedVoice(FakeVoice):
+            execution_devices = ["CPU", "NPU"]
+
+        worker, _voice, _sink, events = self.make_worker(voice=FakeAcceleratedVoice())
+        worker.backend = "hybrid"
+        worker._execution_devices = None
+        worker.read_selection("metadata")
+        wait_for(lambda: any(event.get("status") == "idle" and event.get("characters") == 0 for event in events))
+        self.assertEqual(worker.status()["backend"], "hybrid")
+        self.assertEqual(worker.status()["executionDevices"], ["CPU", "NPU"])
+
     def test_cleanup_profiles_preserve_language_marks_and_remove_target_controls(self):
         raw = "A\u00a0\u2007  B\u2028C\x01D\x85E\u00adF\u200bG\u2060H\ufeffI\u200c\u200d\u202e\ufe0f"
         self.assertEqual(
@@ -252,7 +290,13 @@ class WorkerTests(unittest.TestCase):
         worker.read_selection("This is a sufficiently long first sentence " * 20 + ". " + "Second sentence " * 50 + ".")
         wait_for(lambda: any(e.get("status") == "idle" and e.get("characters") == 0 for e in events))
         self.assertGreaterEqual(len(voice.calls), 2)
-        self.assertEqual(voice.calls[0][1].get("length_scale"), 1.0)
+        first_config = voice.calls[0][1]
+        first_length_scale = (
+            first_config.get("length_scale")
+            if isinstance(first_config, dict)
+            else first_config.length_scale
+        )
+        self.assertEqual(first_length_scale, 1.0)
         self.assertTrue(any(e.get("audioStarted") is True for e in events))
 
     def test_chunk_target_is_configurable_for_benchmarking(self):

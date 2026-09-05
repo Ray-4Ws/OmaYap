@@ -35,6 +35,17 @@ CLEANUP_PROFILES = ("off", "safe", "article")
 DEFAULT_CLEANUP_PROFILE = "safe"
 _STDOUT_LOCK = threading.Lock()
 _REQUEST_ID_UNSET = object()
+VOICE_BACKENDS = ("cpu", "hybrid", "gpu")
+ACCELERATOR_ERROR_CODES = frozenset(
+    {
+        "accelerator-runtime-unavailable",
+        "accelerator-device-unavailable",
+        "accelerator-model-unsupported",
+        "accelerator-compile-failed",
+        "accelerator-inference-failed",
+        "accelerator-output-invalid",
+    }
+)
 
 
 def clamp_speed(value: Any, default: float = DEFAULT_SPEED) -> float:
@@ -442,9 +453,13 @@ class Worker:
         emitter: Optional[Callable[[dict[str, Any]], None]] = None,
         chunk_target: int = CHUNK_TARGET,
         legacy_defaults: bool = False,
+        backend: str = "cpu",
     ) -> None:
+        if backend not in VOICE_BACKENDS:
+            raise ValueError("invalid-backend")
         self.model_path = model_path
         self.config_path = config_path
+        self.backend = backend
         self._voice_loader = voice_loader
         self._player_factory = player_factory or AudioSink
         self._emit_callback = emitter or self._write_event
@@ -469,6 +484,9 @@ class Worker:
         self._request_id: Optional[str] = None
         self._cleanup_profile = DEFAULT_CLEANUP_PROFILE
         self._speed = DEFAULT_SPEED
+        # CPU Piper has an explicit CPUExecutionProvider.  Accelerated device
+        # metadata becomes authoritative only after the lazy voice compiles.
+        self._execution_devices: Optional[list[str]] = ["CPU"] if backend == "cpu" else None
         # A service starts the worker only after its version stamp and model
         # probe pass.  Treat that process as ready from its first metadata
         # event; otherwise the initial setup-required snapshot would briefly
@@ -506,6 +524,9 @@ class Worker:
                 event["requestId"] = active_request_id
             if self._error_code:
                 event["errorCode"] = self._error_code
+            event["backend"] = self.backend
+            if self._execution_devices is not None:
+                event["executionDevices"] = list(self._execution_devices)
             return event
 
     def _emit(
@@ -667,11 +688,23 @@ class Worker:
             elif self.model_path is None:
                 raise FileNotFoundError("voice-model-missing")
             else:
-                voice = _load_piper_voice(
-                    self.model_path,
-                    self.config_path,
-                    legacy_defaults=self._legacy_defaults,
-                )
+                if self.backend == "cpu":
+                    voice = _load_piper_voice(
+                        self.model_path,
+                        self.config_path,
+                        legacy_defaults=self._legacy_defaults,
+                    )
+                else:
+                    if self.model_path is None:
+                        raise RuntimeError("model-unsupported")
+                    try:
+                        if __package__:
+                            from .accelerated_voice import load_accelerated_voice
+                        else:
+                            from accelerated_voice import load_accelerated_voice
+                    except Exception as exc:
+                        raise RuntimeError("accelerator-runtime-unavailable") from exc
+                    voice = load_accelerated_voice(self.model_path, self.config_path, self.backend)
             if voice is None:
                 raise RuntimeError("voice-load-failed")
         except FileNotFoundError as exc:
@@ -700,6 +733,16 @@ class Worker:
             self._voice_loaded = True
             self._voice_loading = False
             self._voice_condition.notify_all()
+        execution_devices = getattr(voice, "execution_devices", None)
+        if execution_devices is None:
+            execution_devices = getattr(voice, "executionDevices", None)
+        if execution_devices is not None:
+            try:
+                devices = [str(device) for device in execution_devices]
+            except (TypeError, ValueError):
+                devices = []
+            with self._lock:
+                self._execution_devices = devices or None
         return voice
 
     @staticmethod
@@ -768,7 +811,9 @@ class Worker:
             if not self._active(generation):
                 return
             code = str(exc)
-            if code == "voice-model-missing":
+            if code in ACCELERATOR_ERROR_CODES:
+                self._emit("error", code)
+            elif code == "voice-model-missing":
                 self._emit("setup-required", code)
             elif code == "piper-runtime-unavailable":
                 self._emit("setup-required", "runtime-missing")
@@ -860,7 +905,7 @@ class Worker:
         return 0
 
 
-def self_test(model_path: Path, config_path: Optional[Path]) -> int:
+def self_test(model_path: Path, config_path: Optional[Path], backend: str = "cpu") -> int:
     """Load Piper and synthesize a tiny phrase without opening an audio sink."""
 
     # Piper's debug logger includes the complete input sentence.  Keep the
@@ -868,7 +913,16 @@ def self_test(model_path: Path, config_path: Optional[Path]) -> int:
     # Python logging globally.
     logging.disable(logging.CRITICAL)
     try:
-        voice = _load_piper_voice(model_path, config_path)
+        if backend == "cpu":
+            voice = _load_piper_voice(model_path, config_path)
+        else:
+            if backend not in VOICE_BACKENDS:
+                return 1
+            if __package__:
+                from .accelerated_voice import load_accelerated_voice
+            else:
+                from accelerated_voice import load_accelerated_voice
+            voice = load_accelerated_voice(model_path, config_path, backend)
         output_seen = False
         for audio in voice.synthesize("Piper setup smoke test", syn_config=_synthesis_config(1.0)):
             if Worker._audio_bytes(audio):
@@ -883,6 +937,7 @@ def self_test(model_path: Path, config_path: Optional[Path]) -> int:
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="OmaYap local TTS worker")
+    parser.add_argument("--backend", choices=VOICE_BACKENDS, default="cpu")
     parser.add_argument("--model", type=Path)
     parser.add_argument("--config", type=Path)
     parser.add_argument(
@@ -913,12 +968,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.self_test:
         if args.model is None:
             return 1
-        return self_test(args.model, args.config)
+        return self_test(args.model, args.config, args.backend)
     worker = Worker(
         args.model,
         args.config,
         chunk_target=args.chunk_target,
         legacy_defaults=args.legacy_defaults,
+        backend=args.backend,
         player_factory=DiscardAudioSink if args.discard_audio else None,
     )
     return worker.run()

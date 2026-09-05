@@ -12,7 +12,7 @@ Item {
   property string omarchyPath: ""
 
   readonly property string pluginId: "omayap.read-aloud"
-  readonly property string pluginVersion: "1.5.2"
+  readonly property string pluginVersion: "1.6.0"
   readonly property int workerProtocolVersion: 1
   readonly property int maxWorkerRequestIdChars: 128
   readonly property string defaultVoiceName: "en_US-lessac-medium"
@@ -59,6 +59,13 @@ Item {
   property string status: "setup-required"
   property real speed: 1.0
   property string cleanupProfile: "safe"
+  // CPU is the safe and backwards-compatible default.  The accelerated
+  // choices are deliberately explicit: a failed accelerator never silently
+  // falls back to a different backend.
+  readonly property var backendValues: ["cpu", "hybrid", "gpu"]
+  property string backend: "cpu"
+  property bool backendSwitchPending: false
+  property bool workerReplacementPending: false
   property int characterCount: 0
   property string errorCode: "runtime-missing"
   // Keep the control busy until the worker acknowledges stop.  The worker
@@ -71,6 +78,11 @@ Item {
   property bool voiceManagerCancelPending: false
   property string pendingReadAfterVoiceList: ""
   property string pendingVoiceSelection: ""
+  // A worker can flush a final state line after shutdown was requested (and
+  // some Process implementations deliver that line after onExited). Do not
+  // let stale status metadata from the old model/backend overwrite the
+  // service while a replacement is in flight.
+  property bool workerOutputSuppressed: false
   // A canceled helper may still deliver its collector/exit signals after
   // running is set false.  Keep a replacement from reusing those fields
   // until both signals have drained.
@@ -170,6 +182,27 @@ Item {
   function validCleanupProfile(value) {
     var profile = String(value || "")
     return ["off", "safe", "article"].indexOf(profile) !== -1 ? profile : "safe"
+  }
+
+  function validBackend(value) {
+    var candidate = String(value || "")
+    return root.backendValues.indexOf(candidate) !== -1 ? candidate : "cpu"
+  }
+
+  function acceleratorVoiceSupported() {
+    return root.voiceName === root.defaultVoiceName
+  }
+
+  function acceleratorErrorDescription(code) {
+    var descriptions = {
+      "accelerator-runtime-unavailable": "The accelerator runtime is unavailable. CPU remains available.",
+      "accelerator-device-unavailable": "The selected accelerator device is unavailable. CPU remains available.",
+      "accelerator-model-unsupported": "This voice model does not support the selected accelerator.",
+      "accelerator-compile-failed": "The voice model could not be compiled for the selected accelerator.",
+      "accelerator-inference-failed": "Accelerator inference failed. No automatic CPU fallback was used.",
+      "accelerator-output-invalid": "The accelerator returned invalid audio. No automatic CPU fallback was used."
+    }
+    return descriptions[code] || "Accelerator execution failed. CPU remains available."
   }
 
   function notify(headline, description) {
@@ -317,6 +350,11 @@ Item {
     root.modelPath = base + ".onnx"
     root.modelConfigPath = base + ".onnx.json"
     root.modelCardPath = base + ".MODEL_CARD"
+    if (id !== root.defaultVoiceName && root.backend !== "cpu") {
+      root.backend = "cpu"
+      root.persistSettings()
+      root.notify("OmaYap backend reset", "Acceleration is available for Lessac only; CPU is selected for this voice.")
+    }
     return true
   }
 
@@ -368,8 +406,10 @@ Item {
     if (!selected) selected = root.defaultVoiceName
     var changed = selected !== root.voiceName
     root.setVoicePaths(selected)
-    if (changed && workerProc.running && root.status === "idle" && !root.stopPending)
-      root.evictIdleWorker()
+    if (changed && workerProc.running && root.status === "idle" && !root.stopPending) {
+      root.workerReplacementPending = true
+      root.requestWorkerReplacement()
+    }
     return true
   }
 
@@ -479,8 +519,10 @@ Item {
       var changed = parsed.voice !== root.voiceName
       root.pendingVoiceSelection = ""
       root.setVoicePaths(parsed.voice)
-      if (changed && workerProc.running && root.status === "idle" && !root.stopPending)
-        root.evictIdleWorker()
+      if (changed && workerProc.running && root.status === "idle" && !root.stopPending) {
+        root.workerReplacementPending = true
+        root.requestWorkerReplacement()
+      }
       root.notify("OmaYap voice selected", "The selected voice will be used for the next reading.")
       root.requestVoiceList()
     }
@@ -550,6 +592,7 @@ Item {
       status: root.status,
       speed: Number(root.speed.toFixed(3)),
       cleanupProfile: root.cleanupProfile,
+      backend: root.backend,
       characters: root.characterCount,
       voice: root.voiceName,
       setupRequired: root.setupRequired,
@@ -563,6 +606,19 @@ Item {
       if (parsed && parsed.speed !== undefined) root.speed = root.clampSpeed(parsed.speed)
       if (parsed && parsed.cleanupProfile !== undefined)
         root.cleanupProfile = root.validCleanupProfile(parsed.cleanupProfile)
+      // Older settings files have no backend key and intentionally remain
+      // CPU-only. Invalid values are also rejected to keep the worker argv
+      // fixed to the three documented backend choices.
+      if (parsed && parsed.backend !== undefined) {
+        var requestedBackend = root.validBackend(parsed.backend)
+        if (requestedBackend !== "cpu" && !root.acceleratorVoiceSupported()) {
+          root.backend = "cpu"
+          root.persistSettings()
+          root.notify("OmaYap backend reset", "Acceleration is available for Lessac only; CPU is selected for this voice.")
+        } else {
+          root.backend = requestedBackend
+        }
+      }
     } catch (error) {
       // A malformed settings file is recoverable.  Keep the default speed and
       // let the next user change rewrite it with mode 0600.
@@ -587,12 +643,19 @@ Item {
     settingsWriteProc.running = true
   }
 
-  function persistSpeed() {
+  function persistSettings() {
     root.pendingSettingsPayload = JSON.stringify({
       speed: Number(root.speed.toFixed(3)),
-      cleanupProfile: root.cleanupProfile
+      cleanupProfile: root.cleanupProfile,
+      backend: root.backend
     })
     root.startSettingsWrite()
+  }
+
+  // Retain the old helper name for the speed/cleanup callers and external
+  // tests while routing all writes through the backend-aware payload.
+  function persistSpeed() {
+    root.persistSettings()
   }
 
   function setSpeed(value) {
@@ -610,6 +673,58 @@ Item {
     root.cleanupProfile = root.validCleanupProfile(value)
     root.persistSpeed()
     return root.cleanupProfile
+  }
+
+  function requestWorkerReplacement() {
+    root.pendingWorkerCommands = []
+    if (!workerProc.running) {
+      root.expectedWorkerExit = false
+      root.workerReplacementPending = false
+      root.backendSwitchPending = false
+      return false
+    }
+    root.workerReplacementPending = true
+    root.workerOutputSuppressed = true
+    if (!root.expectedWorkerExit) {
+      root.expectedWorkerExit = true
+      root.writeWorkerCommand({ command: "shutdown" })
+    }
+    // Keep the existing bounded teardown path for both backend and voice
+    // changes. A stuck native runtime is still terminated after its grace
+    // period, and no stale command is carried into the replacement worker.
+    workerEvictionKillTimer.restart()
+    return true
+  }
+
+  function setBackend(value) {
+    var selected = root.validBackend(value)
+    if (selected !== "cpu" && !root.acceleratorVoiceSupported()) {
+      root.errorCode = "accelerator-model-unsupported"
+      root.notify("OmaYap accelerator unavailable", "Acceleration is available for Lessac only; this voice is CPU only.")
+      return "accelerator-model-unsupported"
+    }
+    // Backend/model replacement is only valid between reads. Reject direct
+    // IPC calls during a capture or synthesis so queued text cannot be
+    // replayed under a different model/backend.
+    if (root.active || root.captureStage !== "idle" || root.stopPending
+        || root.ocrBusy || root.ocrCancelPending || root.voiceManagerBusy
+        || root.voiceManagerCancelPending || root.expectedWorkerExit) return "busy"
+    if (root.backend === selected) return root.backend
+    root.backend = selected
+    root.errorCode = ""
+    root.status = root.setupRequired ? "setup-required" : "idle"
+    root.characterCount = 0
+    root.pendingWorkerCommands = []
+    root.persistSettings()
+    if (workerProc.running) {
+      root.workerReplacementPending = true
+      root.backendSwitchPending = true
+      root.requestWorkerReplacement()
+    } else {
+      root.workerReplacementPending = false
+      root.backendSwitchPending = false
+    }
+    return root.backend
   }
 
   function probeSetup() {
@@ -748,6 +863,7 @@ Item {
       workerProc.command = [
         root.pythonPath,
         root.pluginRoot + "/worker/worker.py",
+        "--backend", root.backend,
         "--model", root.modelPath,
         "--config", root.modelConfigPath
       ]
@@ -764,6 +880,7 @@ Item {
   }
 
   function handleWorkerLine(raw) {
+    if (root.workerOutputSuppressed || root.expectedWorkerExit) return
     var parsed
     try {
       parsed = JSON.parse(String(raw || ""))
@@ -811,6 +928,10 @@ Item {
       root.setupHint()
     } else if (root.errorCode === "synthesis-failed") {
       root.notify("OmaYap error", "Piper could not synthesize this selection.")
+    } else if (["accelerator-runtime-unavailable", "accelerator-device-unavailable",
+                "accelerator-model-unsupported", "accelerator-compile-failed",
+                "accelerator-inference-failed", "accelerator-output-invalid"].indexOf(root.errorCode) !== -1) {
+      root.notify("OmaYap accelerator unavailable", root.acceleratorErrorDescription(root.errorCode))
     }
   }
 
@@ -820,7 +941,8 @@ Item {
     // old wl-copy exit would otherwise clear the new capture's state.
     if (root.queueReadUntilReady("selection")) return
     if (root.captureStage === "restore" || root.stopPending || root.ocrBusy
-        || root.voiceManagerBusy || root.voiceManagerCancelPending) return
+        || root.voiceManagerBusy || root.voiceManagerCancelPending
+        || root.expectedWorkerExit || root.workerReplacementPending || root.backendSwitchPending) return
     if (root.setupRequired) {
       root.setupHint()
       return
@@ -850,7 +972,8 @@ Item {
     }
     // OCR capture is intentionally independent of CLIPBOARD and cannot
     // interrupt a selection, another OCR capture, or playback.
-    if (root.active || root.captureStage !== "idle" || root.stopPending || root.ocrCancelPending || ocrProc.running) return "busy"
+    if (root.active || root.captureStage !== "idle" || root.stopPending || root.ocrCancelPending
+        || root.expectedWorkerExit || root.workerReplacementPending || root.backendSwitchPending || ocrProc.running) return "busy"
     root.ocrBusy = true
     root.status = "capturing"
     root.errorCode = ""
@@ -902,6 +1025,7 @@ Item {
       return
     }
     root.expectedWorkerExit = true
+    root.workerOutputSuppressed = true
     root.writeWorkerCommand({ command: "shutdown" })
     // Some ONNX Runtime builds spend longer than a user-visible interval in
     // native teardown.  The worker is dedicated to OmaYap, so terminate it
@@ -1347,6 +1471,7 @@ Item {
     }
     onStarted: {
       root.expectedWorkerExit = false
+      root.workerOutputSuppressed = false
       root.workerProtocolErrorNotified = false
       workerIdleTimer.stop()
       root.writeWorkerCommand({ command: "set-speed", speed: root.speed })
@@ -1355,11 +1480,15 @@ Item {
     onExited: function(exitCode) {
       workerIdleTimer.stop()
       workerEvictionKillTimer.stop()
+      root.workerOutputSuppressed = true
       if (root.expectedWorkerExit) {
         // Normal cold-idle eviction is not an error.  The service itself stays
         // loaded and the next read starts a fresh worker with current speed.
         var evictionWasStopping = root.stopPending
+        var replacementWasPending = root.workerReplacementPending || root.backendSwitchPending
         root.expectedWorkerExit = false
+        root.workerReplacementPending = false
+        root.backendSwitchPending = false
         root.stopPending = false
         root.characterCount = 0
         root.errorCode = ""
@@ -1368,6 +1497,16 @@ Item {
           : (root.captureStage !== "idle"
             ? "capturing"
             : (root.setupRequired ? "setup-required" : "idle"))
+        if (replacementWasPending) {
+          // A backend/voice replacement deliberately does not replay commands
+          // that were queued while the old process was draining.  In
+          // particular, a speak request captured at the shutdown boundary
+          // must never be synthesized by the old model or silently replayed
+          // by the replacement worker. The next user read starts it with the
+          // current backend and model paths.
+          root.pendingWorkerCommands = []
+          return
+        }
         var queuedAfterEviction = root.pendingWorkerCommands
         root.pendingWorkerCommands = []
         for (var queuedIndex = 0; queuedIndex < queuedAfterEviction.length; queuedIndex++)

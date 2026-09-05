@@ -19,9 +19,23 @@ BarWidget {
   readonly property var voiceCatalog: readAloud ? (readAloud.voiceCatalog || []) : []
   readonly property real speed: readAloud ? Number(readAloud.speed || 1.0) : 1.0
   readonly property string cleanupProfile: readAloud ? String(readAloud.cleanupProfile || "safe") : "safe"
+  readonly property string backend: readAloud ? String(readAloud.backend || "cpu") : "cpu"
+  readonly property bool backendSwitching: readAloud && (Boolean(readAloud.backendSwitchPending)
+    || Boolean(readAloud.workerReplacementPending))
   readonly property int characterCount: readAloud ? Number(readAloud.characterCount || 0) : 0
   readonly property var speedPresets: [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
   readonly property var cleanupProfiles: ["off", "safe", "article"]
+  readonly property var backendOptions: {
+    // The accelerated graph is validated only for Lessac medium. Keep the
+    // native dropdown honest for the other installed voices instead of
+    // showing choices that the service must reject.
+    if (root.voiceName !== "en_US-lessac-medium") return [{ value: "cpu", label: "CPU only" }]
+    return [
+      { value: "cpu", label: "CPU only" },
+      { value: "hybrid", label: "CPU + NPU" },
+      { value: "gpu", label: "GPU" }
+    ]
+  }
   readonly property var voiceOptions: {
     var options = []
     for (var index = 0; index < root.voiceCatalog.length; index++) {
@@ -49,6 +63,7 @@ BarWidget {
 
   readonly property string statusLabel: {
     if (state === "setup-required") return "Setup required"
+    if (root.backendSwitching) return "Switching backend"
     if (readAloud && Boolean(readAloud.voiceManagerBusy)) return "Updating voices"
     if (root.voiceActionsBusy && readAloud && Boolean(readAloud.expectedWorkerExit)) return "Preparing voice"
     if (state === "capturing") return root.ocrBusy ? "Capturing screen text" : "Capturing selection"
@@ -120,6 +135,15 @@ BarWidget {
       root.readAloud.setCleanupProfile(value)
   }
 
+  function chooseBackend(value) {
+    if (root.readAloud && root.readAloud.setBackend)
+      root.readAloud.setBackend(value)
+    // The service may reject a change while a read/voice operation is in
+    // flight, or reset acceleration when a CPU-only voice is selected.
+    // Keep the trigger synchronized with the authoritative service value.
+    backendDropdown.value = root.backend
+  }
+
   function readOcr() {
     if (root.readAloud && root.readAloud.readOcr)
       root.readAloud.readOcr()
@@ -157,6 +181,7 @@ BarWidget {
   }
 
   onVoiceNameChanged: if (voiceDropdown) voiceDropdown.value = root.voiceName
+  onBackendChanged: if (backendDropdown) backendDropdown.value = root.backend
 
   function clickAction() {
     if (readAloud) readAloud.toggleSelection()
@@ -231,6 +256,29 @@ BarWidget {
         fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
         enabled: !root.active && !root.voiceActionsBusy && root.voiceOptions.length > 0
         onChanged: function(value) { root.chooseVoice(value) }
+      }
+
+      Dropdown {
+        id: backendDropdown
+        width: parent.width
+        label: "Backend"
+        value: root.backend
+        options: root.backendOptions
+        foreground: root.bar ? root.bar.foreground : Color.foreground
+        accent: root.bar ? root.bar.barForeground : Color.accent
+        fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+        enabled: !root.active && !root.voiceActionsBusy && !root.backendSwitching
+        onChanged: function(value) { root.chooseBackend(value) }
+      }
+
+      Text {
+        visible: root.voiceName !== "en_US-lessac-medium"
+        text: "Choose Lessac to use GPU or NPU."
+        color: Color.muted
+        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+        font.pixelSize: Style.font.caption
+        width: parent.width
+        wrapMode: Text.WordWrap
       }
 
       Column {

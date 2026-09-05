@@ -10,9 +10,9 @@ grep -Fqx -- '    "displayName": "OmaYap",' "$ROOT/manifest.json"
 grep -Fqx -- '# OmaYap' "$ROOT/README.md"
 grep -Fq -- '`OmaYap` is an Omarchy shell plugin' "$ROOT/README.md"
 grep -Fq -- 'https://github.com/Ray-4Ws/OmaYap' "$ROOT/README.md"
-grep -Fqx -- '  "version": "1.5.2",' "$ROOT/manifest.json"
-grep -Fqx -- '  readonly property string pluginVersion: "1.5.2"' "$ROOT/Service.qml"
-grep -Fqx -- 'PLUGIN_VERSION="1.5.2"' "$ROOT/bin/setup"
+grep -Fqx -- '  "version": "1.6.0",' "$ROOT/manifest.json"
+grep -Fqx -- '  readonly property string pluginVersion: "1.6.0"' "$ROOT/Service.qml"
+grep -Fqx -- 'PLUGIN_VERSION="1.6.0"' "$ROOT/bin/setup"
 ! rg -n -F 'Read aloud setup required' "$ROOT/Service.qml" "$ROOT/BarWidget.qml"
 ! rg -n -F 'Read aloud error' "$ROOT/Service.qml" "$ROOT/BarWidget.qml"
 grep -Fq -- 'property bool stopPending: false' "$ROOT/Service.qml"
@@ -166,6 +166,7 @@ grep -Fq -- 'docs/native-backend-decision.md' "$ROOT/README.md"
 grep -Fq -- 'docs/memory-benchmark-results.md' "$ROOT/README.md"
 
 python3 -m unittest -v tests.test_worker
+python3 -m unittest -v tests.test_accelerated_voice
 python3 -m unittest -v tests.test_integrations
 python3 -m unittest -v tests.test_security_io
 python3 -m unittest -v tests.test_voice_manager

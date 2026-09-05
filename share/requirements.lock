@@ -8,6 +8,11 @@ numpy==2.5.2 \
 onnxruntime==1.29.0 \
     --hash=sha256:e2128f31f449e922c62dbe5d8b6b7b079f0bcaf2d56a102fa203cb6e5bb5ab19 \
     --hash=sha256:d67673c5367727860922c5262d724472f1b5539fb7ccf4c81a638f9b71719803
+openvino==2026.3.0 \
+    --hash=sha256:b7d09f20f009b9167a863f615a2b27400ce025bda8086cc72a2eb6ac3bf1d2af \
+    --hash=sha256:0b071a4e2f731ab29bb9a08bab804c326cc4893283274c352ca56fccafa44749
+openvino-telemetry==2025.2.0 \
+    --hash=sha256:bcb667e83a44f202ecf4cfa49281715c6d7e21499daec04ff853b7f964833599
 packaging==26.3 \
     --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
 pathvalidate==3.3.1 \

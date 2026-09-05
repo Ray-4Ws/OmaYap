@@ -33,6 +33,14 @@ contains another value, the backend emits one metadata-only state event with
 
 ## Adapter boundary
 
+Backend selection is a worker startup argument, `--backend cpu|hybrid|gpu`,
+and defaults to `cpu`. The service persists the selection with speed/cleanup
+settings and replaces the worker when the backend changes while idle. It does
+not send a backend-changing command into an active inference session. A voice
+change away from Lessac resets the accelerated choice to CPU. The accelerated
+adapters validate the exact supported model/configuration hashes before loading.
+See [accelerated backends](accelerated-backends.md) for device paths and limits.
+
 OCR capture is an adapter outside this transport. It hands bounded UTF-8 text
 to the same generic `speak` request; it does not add a second backend command
 or put text in a state event. The OCR adapter reuses
@@ -110,6 +118,13 @@ not attributed to the stopped request.
 
 The optional `audioStarted: true` field is metadata only and marks the first
 audio output. It contains no audio or text.
+Events also report `backend` (`cpu`, `hybrid`, or `gpu`). The optional
+`executionDevices` list reports the compiled neural execution devices after
+loading; it is not inferred merely from the requested backend. Accelerator
+failures use fixed `accelerator-runtime-unavailable`,
+`accelerator-device-unavailable`, `accelerator-model-unsupported`,
+`accelerator-compile-failed`, `accelerator-inference-failed`, or
+`accelerator-output-invalid` codes. There is no automatic neural CPU fallback.
 The production PipeWire sink prepends 160 ms of zero-valued PCM to each fresh
 `pw-play` stream. This device wake-up guard is not synthesized speech and does
 not alter the selected text or backend protocol.

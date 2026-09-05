@@ -7,7 +7,7 @@
 set -Eeuo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-PLUGIN_VERSION="1.5.2"
+PLUGIN_VERSION="1.6.0"
 VOICE="en_US-lessac-medium"
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -267,6 +267,8 @@ prepare_runtime() {
   fi
   [[ -x "$VENV/bin/python" ]] || die "failed to create isolated Python 3.13 environment at $VENV"
   uv pip sync --python "$VENV/bin/python" --require-hashes --no-compile "$LOCKFILE"
+  "$VENV/bin/opt_in_out" --opt_out >/dev/null 2>&1 \
+    || die "could not disable OpenVINO telemetry"
   python3 "$VOICE_MANAGER" install "$VOICE" >/dev/null \
     || die "voice manager could not install the default voice"
   select_default_if_needed
@@ -406,7 +408,7 @@ main() {
   install_binding
   ensure_private_dir "${CONFIG_HOME}/omayap-read-aloud"
   local stamp_tmp="$STAMP.tmp.$$"
-  printf 'PLUGIN_VERSION=%s\nPYTHON=3.13\nPIPER=1.7.0\nVOICE=%s\nVOICE_SHA256=%s\n' \
+  printf 'PLUGIN_VERSION=%s\nPYTHON=3.13\nPIPER=1.7.0\nOPENVINO=2026.3.0\nVOICE=%s\nVOICE_SHA256=%s\n' \
     "$PLUGIN_VERSION" "$VOICE" "$MODEL_SHA256" >"$stamp_tmp"
   chmod 600 -- "$stamp_tmp"
   mv -f -- "$stamp_tmp" "$STAMP"

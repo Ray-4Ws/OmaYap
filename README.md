@@ -32,7 +32,8 @@ omarchy plugin add https://github.com/Ray-4Ws/OmaYap --enable
   safely before touching the binding file;
 - creates a private Python 3.13 environment under
   `~/.local/share/omayap-read-aloud/` and installs the hash-locked Piper
-  runtime;
+  runtime and the optional-backend OpenVINO runtime; OpenVINO telemetry is
+  disabled by setup, and OpenVINO is imported only for an accelerated read;
 - installs only the default official voice (`en_US-lessac-medium`) through the
   checked-in voice catalog, verifying the model, JSON configuration, and model
   card with pinned byte counts and SHA-256 checksums;
@@ -85,7 +86,7 @@ read starts a fresh worker with the saved speed.
   queued and starts as soon as that metadata-only scan finishes; the first
   shortcut after setup is not discarded.
 - The service IPC target is `omayap.read-aloud` with `toggleSelection`,
-  `readSelection`, `readOcr`, `stop`, `setSpeed`, `setCleanupProfile`, and
+  `readSelection`, `readOcr`, `stop`, `setSpeed`, `setCleanupProfile`, `setBackend`, and
   `status` methods.
 - The private backend stdin/stdout contract is documented in
   [`docs/backend-protocol.md`](docs/backend-protocol.md); selection reads use
@@ -94,6 +95,33 @@ read starts a fresh worker with the saved speed.
 F10 and Ctrl+F10 are installed by setup rather than by the plugin manifest
 because Omarchy plugin installation does not modify keybindings. The bar
 widget defaults to the right section and cannot be duplicated.
+
+### Backend selection (local development branch)
+
+The bar menu's **Backend** selector offers **CPU only**, **CPU + NPU**, and
+**GPU**. CPU is the default. Select **Lessac** to try the accelerated options;
+this initial implementation validates the exact Lessac medium model and
+configuration, so the other three voices remain CPU only. Choosing another
+voice resets the backend to CPU. There are no extra voice downloads.
+
+CPU uses the existing low-memory ONNX Runtime path. CPU + NPU uses CPU for
+text/duration processing and the Intel NPU for waveform generation, with
+overlapping fixed-size blocks to preserve continuity. GPU runs the neural
+model on the Intel GPU through OpenVINO in FP32; text preparation and audio
+playback remain ordinary host work. Neither accelerated option silently falls
+back to CPU after a device or compilation failure. You can select CPU again
+from the same menu.
+
+Change backends while OmaYap is idle. The previous worker is shut down before
+the next read, and the choice is saved alongside speed and cleanup settings.
+All backends retain the stop mechanism and 60-second idle unloading. Older
+settings files without a backend field default to CPU.
+
+The first accelerated read can take several seconds to load/compile, and GPU
+inference may prepare additional kernels for a new input size. Acceleration
+can increase retained memory; it is not a memory-saving switch. Support has
+been checked on an Intel Core Ultra 7 255H. Other GPU vendors and other Piper
+voices have not been validated. See [backend details](docs/accelerated-backends.md).
 
 ## Selection and privacy
 

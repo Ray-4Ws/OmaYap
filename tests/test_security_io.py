@@ -49,6 +49,26 @@ class SettingsStoreTests(unittest.TestCase):
             self.assertEqual(read.stdout, b'{"speed":1.75,"cleanupProfile":"article"}\n')
             self.assertEqual(read.stderr, b"")
 
+    def test_backend_is_persisted_while_legacy_payload_defaults_to_cpu(self):
+        with TemporaryDirectory() as directory:
+            path = self.private_settings_path(directory)
+            legacy = self.run_store("write", path, b'{"speed":1.0,"cleanupProfile":"safe"}')
+            self.assertEqual(legacy.returncode, 0)
+            self.assertEqual(self.run_store("read", path).stdout,
+                             b'{"speed":1.0,"cleanupProfile":"safe"}\n')
+
+            current = self.run_store(
+                "write", path, b'{"speed":1.0,"cleanupProfile":"safe","backend":"hybrid"}'
+            )
+            self.assertEqual(current.returncode, 0)
+            self.assertEqual(self.run_store("read", path).stdout,
+                             b'{"speed":1.0,"cleanupProfile":"safe","backend":"hybrid"}\n')
+
+            invalid = self.run_store(
+                "write", path, b'{"speed":1.0,"cleanupProfile":"safe","backend":"npu"}'
+            )
+            self.assertNotEqual(invalid.returncode, 0)
+
     def test_symlink_is_neither_read_nor_followed_by_writer(self):
         with TemporaryDirectory() as directory:
             path = self.private_settings_path(directory)
