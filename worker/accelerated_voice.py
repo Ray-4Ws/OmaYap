@@ -1,10 +1,10 @@
-"""Optional OpenVINO backends for the pinned Piper Lessac voice.
+"""Optional OpenVINO backends for OmaYap's pinned Piper voices.
 
 The normal worker intentionally keeps this module cold.  It is imported only
 after an accelerated backend has been selected, and this module imports
 NumPy, OpenVINO, and Piper only while constructing the selected voice.
 
-The hybrid backend cuts the inspected Lessac graph immediately before
+The hybrid backend cuts the inspected medium-quality graphs immediately before
 ``/dec/conv_pre`` (the output is the ``/Mul_7`` node), runs the dynamic
 phoneme frontend on one CPU thread, and sends fixed ``[1, 192, 256]`` decoder
 tiles to the NPU.  The GPU backend compiles the complete graph on the GPU.
@@ -23,14 +23,15 @@ from typing import Any, Iterator, Mapping, Optional
 
 
 BACKENDS = ("hybrid", "gpu")
-MODEL_SHA256 = "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f"
-CONFIG_SHA256 = "efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0"
-MODEL_BASENAME = "en_US-lessac-medium.onnx"
 # Exact sizes are a cheap pre-hash guard against accidentally reading an
-# arbitrary local file into the accelerator process.  They also pin the
-# artifact pair alongside the digests below.
-MODEL_BYTES = 63_201_294
-CONFIG_BYTES = 4_885
+# arbitrary local file into the accelerator process. Digests match the same
+# immutable artifacts accepted by the voice manager's catalog.
+VOICE_FILES = {
+    "en_US-lessac-medium.onnx": (63_201_294, "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f", 4_885, "efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0"),
+    "en_US-kristin-medium.onnx": (63_531_379, "5849957f929cbf720c258f8458692d6103fff2f0e3d3b19c8259474bb06a18d4", 4_968, "5681426d4aead22195de70531eeeeddb46493cfaffc5764b2ea3db73428b651c"),
+    "en_US-john-medium.onnx": (63_531_379, "789c6c875726e627ddee93d51d8727859abe9c091c3d141591f4b83c2072e988", 4_965, "af60f177b6b550f3d7a302720c0fb89e7f94a82b5dca464775ef63b1c69ba09a"),
+    "en_GB-alba-medium.onnx": (63_201_294, "401369c4a81d09fdd86c32c5c864440811dbdcc66466cde2d64f7133a66ad03b", 4_888, "aa965a2f02ecced632c2694e1fc72bbff6d65f265fab567ca945918c73dd89f4"),
+}
 MAX_TOKENS = 2_048
 MAX_LATENT_FRAMES = 8_192
 MAX_AUDIO_SAMPLES = MAX_LATENT_FRAMES * 256
@@ -89,26 +90,30 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def verify_lessac_files(model_path: Path, config_path: Optional[Path] = None) -> tuple[Path, Path]:
-    """Verify the exact Lessac model/config pair accepted by acceleration.
+def verify_voice_files(model_path: Path, config_path: Optional[Path] = None) -> tuple[Path, Path]:
+    """Verify an exact catalog model/config pair accepted by acceleration.
 
     Accelerated inference is deliberately narrower than CPU Piper.  A model
-    with the same shape but a different speaker, quality, or graph revision is
-    not accepted because its graph cut and output scaling are unvalidated.
+    A model with the same shape but a different speaker, quality, or graph
+    revision is not accepted because its graph cut is unvalidated.
     Symlinks are rejected as well; setup owns regular files in its private
     model directory.
     """
 
     model = Path(model_path)
     config = Path(config_path) if config_path is not None else Path(f"{model}.json")
+    expected = VOICE_FILES.get(model.name)
+    if expected is None:
+        raise _error("model-unsupported")
+    model_bytes, model_sha256, config_bytes, config_sha256 = expected
     if not _regular_file(model) or not _regular_file(config):
         raise _error("model-unsupported")
     try:
-        if model.lstat().st_size != MODEL_BYTES or config.lstat().st_size != CONFIG_BYTES:
+        if model.lstat().st_size != model_bytes or config.lstat().st_size != config_bytes:
             raise _error("model-unsupported")
     except OSError as exc:
         raise _error("model-unsupported", exc)
-    if _sha256(model) != MODEL_SHA256 or _sha256(config) != CONFIG_SHA256:
+    if _sha256(model) != model_sha256 or _sha256(config) != config_sha256:
         raise _error("model-unsupported")
     return model, config
 
@@ -208,14 +213,14 @@ def hybrid_tiles(frame_count: int, *, width: int = TILE_WIDTH, context: int = TI
 
 
 class AcceleratedVoice:
-    """Pinned Lessac voice using either hybrid NPU or full GPU inference."""
+    """Pinned catalog voice using either hybrid NPU or full GPU inference."""
 
     def __init__(self, model_path: Path, config_path: Optional[Path], backend: str) -> None:
         if backend not in BACKENDS:
             raise _error("model-unsupported")
         self.backend = backend
         self.execution_devices: list[str] = []
-        self.model_path, self.config_path = verify_lessac_files(model_path, config_path)
+        self.model_path, self.config_path = verify_voice_files(model_path, config_path)
 
         try:
             import numpy as np  # type: ignore

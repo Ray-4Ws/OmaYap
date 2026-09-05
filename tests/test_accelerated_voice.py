@@ -6,11 +6,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from worker.accelerated_voice import (
-    CONFIG_SHA256,
-    MODEL_SHA256,
+    VOICE_FILES,
     AcceleratedVoice,
     hybrid_tiles,
-    verify_lessac_files,
+    verify_voice_files,
 )
 
 
@@ -32,7 +31,18 @@ class AcceleratedVoicePureTests(unittest.TestCase):
             model.write_bytes(b"wrong model")
             config.write_bytes(b"{}")
             with self.assertRaisesRegex(RuntimeError, "accelerator-model-unsupported"):
-                verify_lessac_files(model, config)
+                verify_voice_files(model, config)
+
+    def test_all_catalog_voice_artifacts_are_pinned(self):
+        self.assertEqual(
+            set(VOICE_FILES),
+            {
+                "en_US-lessac-medium.onnx",
+                "en_US-kristin-medium.onnx",
+                "en_US-john-medium.onnx",
+                "en_GB-alba-medium.onnx",
+            },
+        )
 
     def test_pinned_pair_can_be_checked_without_loading_accelerator_runtime(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -40,13 +50,12 @@ class AcceleratedVoicePureTests(unittest.TestCase):
             config = Path(directory) / "voice.onnx.json"
             model.write_bytes(b"fixture model")
             config.write_bytes(b"fixture config")
-            with patch("worker.accelerated_voice.MODEL_BYTES", model.stat().st_size), patch(
-                "worker.accelerated_voice.CONFIG_BYTES", config.stat().st_size
-            ), patch(
+            expected = (model.stat().st_size, "model-digest", config.stat().st_size, "config-digest")
+            with patch.dict("worker.accelerated_voice.VOICE_FILES", {model.name: expected}, clear=True), patch(
                 "worker.accelerated_voice._sha256",
-                side_effect=[MODEL_SHA256, CONFIG_SHA256],
+                side_effect=["model-digest", "config-digest"],
             ):
-                self.assertEqual(verify_lessac_files(model, config), (model, config))
+                self.assertEqual(verify_voice_files(model, config), (model, config))
 
     @unittest.skipUnless(
         __import__("importlib.util").util.find_spec("numpy") is not None,

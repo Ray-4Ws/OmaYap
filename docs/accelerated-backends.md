@@ -13,9 +13,9 @@ the existing four-voice plugin.
 
 All paths keep phonemization, host orchestration, and PipeWire playback on CPU.
 Direct device compilation and checked `EXECUTION_DEVICES` prevent an unnoticed
-change of backend. The first accelerated implementation accepts only the
-SHA-256-pinned Lessac medium ONNX model and configuration already in the main
-voice catalog. Its weights are not retrained, distilled, quantized, or replaced.
+change of backend. Acceleration accepts the SHA-256-pinned Lessac, Kristin,
+John, and Alba medium ONNX models and configurations in the voice catalog.
+Their weights are not retrained, distilled, quantized, or replaced.
 
 The hybrid boundary is the `/Mul_7` output immediately before
 `/dec/conv_pre`. The existing graph supplies a 332-operation waveform decoder.
@@ -57,12 +57,26 @@ conversion. All three cases retained identical sample counts and peak levels
 to CPU; hybrid RMS amplitude ratios were 0.9989–1.0002 and GPU ratios were
 within about 0.0002% of CPU. Correlations exceeded 0.99999946 for hybrid and
 0.999999997 for GPU. Synthetic WAVs and measurements are saved locally at
-`/home/user/Work/omayap-backend-validation.5MnSEK/`.
+`/home/user/Work/omayap-backend-validation.5MnSEK/`. That initial comparison
+used Lessac; every other catalog voice is checked separately before release.
 
 `benchmarks/backends.py` reproduces the adapter checks without playback, and
 `benchmarks/worker_backends.py` exercises real worker cancellation during
 loading followed by a replacement read through the normal protocol with audio
 discarded. Both use only synthetic benchmark text.
+
+Kristin, John, and Alba were subsequently checked with the same three passages
+on every backend. All accelerated files had the same sample count as CPU.
+CPU + NPU waveform correlations were above 0.9999979 and direct GPU
+correlations were above 0.999999998; device properties and hardware counters
+confirmed the requested NPU or GPU executed each passage. Results are saved at
+`/home/user/Work/omayap-all-voices-validation/`.
+
+One Alba GPU process aborted inside native runtime code during a long sequence
+that repeatedly loaded and unloaded different CPU, NPU, and GPU models. A clean
+isolated rerun completed all passages. Production isolates a selected backend
+in its disposable worker, so a runtime abort cannot take down the shell, but
+rapid cross-voice accelerator stress may still expose driver instability.
 
 The preceding hybrid experiment compared the same Lessac weights with CPU
 inference, obtaining waveform correlation above 0.999999 and approximately

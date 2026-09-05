@@ -99,10 +99,9 @@ widget defaults to the right section and cannot be duplicated.
 ### Backend selection (local development branch)
 
 The bar menu's **Backend** selector offers **CPU only**, **CPU + NPU**, and
-**GPU**. CPU is the default. Select **Lessac** to try the accelerated options;
-this initial implementation validates the exact Lessac medium model and
-configuration, so the other three voices remain CPU only. Choosing another
-voice resets the backend to CPU. There are no extra voice downloads.
+**GPU**. CPU is the default. All four catalog voices—Lessac, Kristin, John,
+and Alba—can use either accelerated option. Each exact model and configuration
+is checksum-pinned; there are no extra voice downloads.
 
 CPU uses the existing low-memory ONNX Runtime path. CPU + NPU uses CPU for
 text/duration processing and the Intel NPU for waveform generation, with
@@ -120,8 +119,9 @@ settings files without a backend field default to CPU.
 The first accelerated read can take several seconds to load/compile, and GPU
 inference may prepare additional kernels for a new input size. Acceleration
 can increase retained memory; it is not a memory-saving switch. Support has
-been checked on an Intel Core Ultra 7 255H. Other GPU vendors and other Piper
-voices have not been validated. See [backend details](docs/accelerated-backends.md).
+been checked on an Intel Core Ultra 7 255H. Other GPU vendors and Piper voices
+outside the four-item catalog have not been validated. See
+[backend details](docs/accelerated-backends.md).
 
 ## Selection and privacy
 

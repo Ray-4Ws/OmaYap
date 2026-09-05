@@ -12,7 +12,7 @@ Item {
   property string omarchyPath: ""
 
   readonly property string pluginId: "omayap.read-aloud"
-  readonly property string pluginVersion: "1.6.0"
+  readonly property string pluginVersion: "1.6.1"
   readonly property int workerProtocolVersion: 1
   readonly property int maxWorkerRequestIdChars: 128
   readonly property string defaultVoiceName: "en_US-lessac-medium"
@@ -190,7 +190,7 @@ Item {
   }
 
   function acceleratorVoiceSupported() {
-    return root.voiceName === root.defaultVoiceName
+    return root.validVoiceId(root.voiceName)
   }
 
   function acceleratorErrorDescription(code) {
@@ -350,11 +350,6 @@ Item {
     root.modelPath = base + ".onnx"
     root.modelConfigPath = base + ".onnx.json"
     root.modelCardPath = base + ".MODEL_CARD"
-    if (id !== root.defaultVoiceName && root.backend !== "cpu") {
-      root.backend = "cpu"
-      root.persistSettings()
-      root.notify("OmaYap backend reset", "Acceleration is available for Lessac only; CPU is selected for this voice.")
-    }
     return true
   }
 
@@ -614,7 +609,7 @@ Item {
         if (requestedBackend !== "cpu" && !root.acceleratorVoiceSupported()) {
           root.backend = "cpu"
           root.persistSettings()
-          root.notify("OmaYap backend reset", "Acceleration is available for Lessac only; CPU is selected for this voice.")
+          root.notify("OmaYap backend reset", "This voice cannot use acceleration; CPU has been selected.")
         } else {
           root.backend = requestedBackend
         }
@@ -700,7 +695,7 @@ Item {
     var selected = root.validBackend(value)
     if (selected !== "cpu" && !root.acceleratorVoiceSupported()) {
       root.errorCode = "accelerator-model-unsupported"
-      root.notify("OmaYap accelerator unavailable", "Acceleration is available for Lessac only; this voice is CPU only.")
+      root.notify("OmaYap accelerator unavailable", "This voice cannot use the selected accelerator.")
       return "accelerator-model-unsupported"
     }
     // Backend/model replacement is only valid between reads. Reject direct

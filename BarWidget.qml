@@ -26,10 +26,6 @@ BarWidget {
   readonly property var speedPresets: [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
   readonly property var cleanupProfiles: ["off", "safe", "article"]
   readonly property var backendOptions: {
-    // The accelerated graph is validated only for Lessac medium. Keep the
-    // native dropdown honest for the other installed voices instead of
-    // showing choices that the service must reject.
-    if (root.voiceName !== "en_US-lessac-medium") return [{ value: "cpu", label: "CPU only" }]
     return [
       { value: "cpu", label: "CPU only" },
       { value: "hybrid", label: "CPU + NPU" },
@@ -269,16 +265,6 @@ BarWidget {
         fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
         enabled: !root.active && !root.voiceActionsBusy && !root.backendSwitching
         onChanged: function(value) { root.chooseBackend(value) }
-      }
-
-      Text {
-        visible: root.voiceName !== "en_US-lessac-medium"
-        text: "Choose Lessac to use GPU or NPU."
-        color: Color.muted
-        font.family: root.bar ? root.bar.fontFamily : Style.font.family
-        font.pixelSize: Style.font.caption
-        width: parent.width
-        wrapMode: Text.WordWrap
       }
 
       Column {
