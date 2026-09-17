@@ -441,7 +441,7 @@ class WorkerTests(unittest.TestCase):
 
         worker = Worker(voice_loader=loader, player_factory=FakeSink, emitter=events.append)
         worker.read_selection("first attempt")
-        wait_for(lambda: any(e.get("errorCode") == "temporary" for e in events))
+        wait_for(lambda: any(e.get("errorCode") == "synthesis-failed" for e in events))
         worker.read_selection("second attempt")
         wait_for(lambda: any(e.get("status") == "idle" and e.get("characters") == 0 for e in events))
         self.assertEqual(calls, 2)

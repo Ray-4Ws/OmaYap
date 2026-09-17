@@ -123,6 +123,38 @@ been checked on an Intel Core Ultra 7 255H. Other GPU vendors and Piper voices
 outside the four-item catalog have not been validated. See
 [backend details](docs/accelerated-backends.md).
 
+## Agent announcements
+
+Local AI agents with shell access can use the portable
+[`omayap-yaps` skill](integrations/agents/omayap-yaps/SKILL.md) when the user
+requests audible announcements. This uses the same selected voice, speed,
+and CPU/GPU/CPU+NPU backend as ordinary reading. Hosted agents need a local
+execution connection; the skill alone does not grant desktop access.
+
+To make the skill discoverable, copy or symlink its folder into your agent's
+skills directory (for example, `~/.agents/skills/omayap-yaps`). The folder is
+portable Agent Skills format; installation is opt-in and does not grant agents
+permission to speak without your instruction.
+
+The client is `~/.config/omarchy/plugins/omayap.read-aloud/bin/yap`. Fixed
+announcements use `--event task-complete`, `input-needed`, `permission-needed`,
+or `error`. Custom announcements are read from stdin with no text arguments.
+Success produces no output, which keeps repeated agent calls inexpensive in
+context. A successful call acknowledges acceptance; audio completion is
+asynchronous. A busy reader refuses the request; agents should not poll or
+retry repeatedly. The skill does not enable announcements without user intent.
+
+Enable **Agent speaking indicator** in the OmaYap popup to show a small robot
+head next to the middle of the bar while agent audio is playing. It is off by
+default, follows the bar's screen and orientation, and does not intercept clicks
+or keyboard focus. Selection/OCR speech does not display the robot. F10 and the
+usual stop action still stop speech.
+
+The bridge is a private Unix socket in the user's runtime directory, verifies
+same-user credentials, and carries bounded text in memory. No extra TTS service
+or model is kept resident for agents; the existing worker still expires after
+60 idle seconds.
+
 ## Selection and privacy
 
 The service first reads Wayland PRIMARY with `wl-paste --primary`; CLIPBOARD is

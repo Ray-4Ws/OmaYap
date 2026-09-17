@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell
+import Quickshell.Wayland
 import qs.Ui
 import qs.Commons
 
@@ -44,6 +45,42 @@ BarWidget {
     return options
   }
   property bool popupOpen: false
+
+  // A small visual-only badge beside the center of the hosting bar. It follows
+  // the bar's screen and orientation and never reserves space or takes input.
+  PanelWindow {
+    visible: root.readAloud && root.readAloud.agentIndicatorEnabled && root.readAloud.agentSpeaking
+    screen: root.QsWindow.window ? root.QsWindow.window.screen : null
+    color: "transparent"
+    implicitWidth: Style.space(32)
+    implicitHeight: Style.space(32)
+    anchors.top: !root.vertical && (!root.bar || root.bar.position !== "bottom")
+    anchors.bottom: !root.vertical && root.bar && root.bar.position === "bottom"
+    anchors.left: root.vertical && root.bar && root.bar.position === "left"
+    anchors.right: root.vertical && root.bar && root.bar.position === "right"
+    margins.top: root.barSize + Style.space(4)
+    margins.bottom: root.barSize + Style.space(4)
+    margins.left: root.barSize + Style.space(4)
+    margins.right: root.barSize + Style.space(4)
+    exclusionMode: ExclusionMode.Ignore
+    WlrLayershell.namespace: "omayap-agent-speaking"
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+    mask: Region {}
+    Rectangle {
+      anchors.fill: parent
+      radius: Style.cornerRadius
+      color: Color.background
+      border.color: Color.accent
+      Text {
+        anchors.centerIn: parent
+        text: "󰚩"
+        color: Color.accent
+        font.family: Style.font.family
+        font.pixelSize: Style.space(22)
+      }
+    }
+  }
 
   readonly property string iconText: {
     if (state === "setup-required") return "󰒓"
@@ -265,6 +302,14 @@ BarWidget {
         fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
         enabled: !root.active && !root.voiceActionsBusy && !root.backendSwitching
         onChanged: function(value) { root.chooseBackend(value) }
+      }
+
+      Toggle {
+        width: parent.width
+        label: "Agent speaking indicator"
+        checked: root.readAloud ? root.readAloud.agentIndicatorEnabled : false
+        titleSize: Style.font.bodySmall
+        onClicked: if (root.readAloud) root.readAloud.setAgentIndicator(!checked)
       }
 
       Column {

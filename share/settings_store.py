@@ -111,10 +111,10 @@ def _validated_payload() -> bytes | None:
         parsed = json.loads(raw.decode("utf-8", errors="strict"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
-    if not isinstance(parsed, dict) or set(parsed) not in (
-        {"speed", "cleanupProfile"},
-        {"speed", "cleanupProfile", "backend"},
-    ):
+    if not isinstance(parsed, dict) or not {"speed", "cleanupProfile"} <= set(parsed) \
+            or not set(parsed) <= {"speed", "cleanupProfile", "backend", "agentIndicatorEnabled"}:
+        return None
+    if "agentIndicatorEnabled" in parsed and type(parsed["agentIndicatorEnabled"]) is not bool:
         return None
     speed = parsed["speed"]
     profile = parsed["cleanupProfile"]
@@ -138,6 +138,8 @@ def _validated_payload() -> bytes | None:
     # remain compatible and are interpreted by the service as CPU.
     if "backend" in parsed:
         canonical["backend"] = backend
+    if "agentIndicatorEnabled" in parsed:
+        canonical["agentIndicatorEnabled"] = parsed["agentIndicatorEnabled"]
     return (json.dumps(canonical, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
 
 

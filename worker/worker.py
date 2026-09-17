@@ -22,6 +22,23 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Optional
 
+try:
+    from .agent_socket import (
+        AgentSocketServer,
+        MAX_CHARS as MAX_AGENT_CHARS,
+        MAX_FRAME_BYTES as MAX_AGENT_FRAME_BYTES,
+        MAX_TEXT_BYTES as MAX_AGENT_TEXT_BYTES,
+        PROTOCOL_VERSION as AGENT_PROTOCOL_VERSION,
+    )
+except ImportError:  # pragma: no cover - direct worker.py execution
+    from agent_socket import (  # type: ignore
+        AgentSocketServer,
+        MAX_CHARS as MAX_AGENT_CHARS,
+        MAX_FRAME_BYTES as MAX_AGENT_FRAME_BYTES,
+        MAX_TEXT_BYTES as MAX_AGENT_TEXT_BYTES,
+        PROTOCOL_VERSION as AGENT_PROTOCOL_VERSION,
+    )
+
 
 MAX_CHARS = 20_000
 MIN_SPEED = 0.5
@@ -46,6 +63,32 @@ ACCELERATOR_ERROR_CODES = frozenset(
         "accelerator-output-invalid",
     }
 )
+# Compatibility aliases for callers that imported the former Yaps transport
+# constants.  The wire protocol is now generic and user-authorized.
+MAX_YAP_TEXT_BYTES = MAX_AGENT_TEXT_BYTES
+MAX_YAP_FRAME_BYTES = MAX_AGENT_FRAME_BYTES
+AGENT_EVENTS = {
+    "task-complete": "Task complete.",
+    "input-needed": "Input needed.",
+    "permission-needed": "Permission needed.",
+    "error": "An error occurred.",
+}
+AGENT_ERROR_CODES = frozenset(
+    {
+        "audio-player-unavailable",
+        "audio-player-failed",
+        "voice-model-missing",
+        "piper-runtime-unavailable",
+        "voice-config-invalid",
+        "voice-unavailable",
+        "voice-load-failed",
+        "synthesis-failed",
+        "invalid-selection",
+        "empty-selection",
+        "selection-too-long",
+        "busy",
+    }
+).union(ACCELERATOR_ERROR_CODES)
 
 
 def clamp_speed(value: Any, default: float = DEFAULT_SPEED) -> float:
@@ -346,6 +389,7 @@ class AudioSink:
         self.command = command or ["pw-play"]
         self.process: Optional[subprocess.Popen[bytes]] = None
         self.sample_rate: Optional[int] = None
+        self._stopped = False
         self._lock = threading.Lock()
 
     def _start(self, sample_rate: int) -> None:
@@ -377,6 +421,8 @@ class AudioSink:
         # seconds).  Killing the detached process below unblocks the writer
         # and causes it to fail harmlessly with BrokenPipeError/OSError.
         with self._lock:
+            if self._stopped:
+                raise RuntimeError("audio-player-failed")
             started = self.process is None
             if self.process is None:
                 self._start(sample_rate)
@@ -396,7 +442,7 @@ class AudioSink:
 
     def finish(self) -> None:
         with self._lock:
-            process, self.process = self.process, None
+            process = self.process
         if process is None:
             return
         try:
@@ -408,9 +454,14 @@ class AudioSink:
                 process.kill()
             except OSError:
                 pass
+        finally:
+            with self._lock:
+                if self.process is process:
+                    self.process = None
 
     def stop(self) -> None:
         with self._lock:
+            self._stopped = True
             process, self.process = self.process, None
         if process is None:
             return
@@ -468,6 +519,10 @@ class Worker:
         self._voice: Any = None
         self._voice_loaded = False
         self._lock = threading.RLock()
+        # stdin and the optional agent socket share one command admission
+        # lock.  This keeps the busy check and generation assignment atomic;
+        # an agent request can never race a selection into interrupting it.
+        self._command_lock = threading.RLock()
         self._voice_condition = threading.Condition(self._lock)
         # ``stop`` invalidates a generation but cannot interrupt a Piper/ONNX
         # call already in progress.  Replacement reads therefore wait here
@@ -481,6 +536,7 @@ class Worker:
         self._sink: Optional[AudioSink] = None
         self._text = ""
         self._characters = 0
+        self._source: Optional[str] = None
         self._request_id: Optional[str] = None
         self._cleanup_profile = DEFAULT_CLEANUP_PROFILE
         self._speed = DEFAULT_SPEED
@@ -517,6 +573,7 @@ class Worker:
                 "status": self._status,
                 "speed": round(self._speed, 3),
                 "characters": self._characters,
+                "source": self._source,
                 "cleanupProfile": self._cleanup_profile,
             }
             active_request_id = self._request_id if request_id is _REQUEST_ID_UNSET else request_id
@@ -544,6 +601,29 @@ class Worker:
             event = self._snapshot(request_id=request_id)
         event.update({key: value for key, value in extra.items() if value is not None})
         self._emit_callback(event)
+
+    def _emit_generation(
+        self,
+        generation: int,
+        status: Optional[str] = None,
+        error_code: str = "",
+        **extra: Any,
+    ) -> bool:
+        """Emit only while ``generation`` still owns the worker state."""
+
+        with self._lock:
+            if self._shutdown or generation != self._generation:
+                return False
+            if status is not None:
+                self._status = status
+            self._error_code = error_code
+            event = self._snapshot()
+            event.update({key: value for key, value in extra.items() if value is not None})
+            # Keep the metadata emission ordered with generation transitions.
+            # The lock is not held across synthesis or audio I/O, only this
+            # bounded callback, so stop remains responsive.
+            self._emit_callback(event)
+        return True
 
     def status(self) -> dict[str, Any]:
         return self._snapshot()
@@ -585,31 +665,53 @@ class Worker:
         version = message.get("protocolVersion")
         return type(version) is int and version == PROTOCOL_VERSION
 
-    def read_selection(
+    def _is_busy_locked(self) -> bool:
+        """Return whether a generation is still loading, speaking, or unwinding."""
+
+        with self._lock:
+            thread_alive = self._thread is not None and self._thread.is_alive()
+            return thread_alive or self._status in {"loading", "speaking", "stopping"}
+
+    def _read_selection_locked(
         self,
         text: Any,
-        request_id: Optional[str] = None,
-        cleanup_profile: str = DEFAULT_CLEANUP_PROFILE,
-    ) -> None:
+        request_id: Optional[str],
+        cleanup_profile: str,
+        *,
+        source: str,
+        interrupt: bool,
+    ) -> bool:
+        """Admit one read while the caller holds ``_command_lock``."""
+
+        if source not in {"selection", "agent"}:
+            self._emit("error", "invalid-source", request_id=None)
+            return False
         if request_id is not None and not self._valid_request_id(request_id):
             self._emit("error", "invalid-request-id", request_id=None)
-            return
+            return False
         if cleanup_profile not in CLEANUP_PROFILES:
             self._emit("error", "invalid-cleanup-profile", request_id=None)
-            return
+            return False
+        if not interrupt and self._is_busy_locked():
+            return False
+        if interrupt:
+            self._stop_locked(emit=False)
         if not isinstance(text, str):
-            self.stop(emit=False)
             with self._lock:
                 self._request_id = request_id
+                self._source = source
                 self._cleanup_profile = cleanup_profile
+                self._characters = 0
             self._emit("error", "invalid-selection")
             with self._lock:
                 self._request_id = None
-            return
+                self._source = None
+            return False
+
         actual = len(text)
-        self.stop(emit=False)
         with self._lock:
             self._request_id = request_id
+            self._source = source
             self._cleanup_profile = cleanup_profile
         if actual > MAX_CHARS:
             with self._lock:
@@ -617,7 +719,8 @@ class Worker:
             self._emit("error", "selection-too-long", actual=actual, limit=MAX_CHARS)
             with self._lock:
                 self._request_id = None
-            return
+                self._source = None
+            return False
         text = cleanup_text(text, cleanup_profile)
         if not text.strip():
             with self._lock:
@@ -625,7 +728,8 @@ class Worker:
             self._emit("error", "empty-selection")
             with self._lock:
                 self._request_id = None
-            return
+                self._source = None
+            return False
 
         with self._lock:
             self._generation += 1
@@ -638,8 +742,26 @@ class Worker:
         with self._lock:
             self._thread = thread
         thread.start()
+        return True
 
-    def stop(self, *, emit: bool = True) -> None:
+    def read_selection(
+        self,
+        text: Any,
+        request_id: Optional[str] = None,
+        cleanup_profile: str = DEFAULT_CLEANUP_PROFILE,
+        *,
+        source: str = "selection",
+    ) -> bool:
+        with self._command_lock:
+            return self._read_selection_locked(
+                text,
+                request_id,
+                cleanup_profile,
+                source=source,
+                interrupt=True,
+            )
+
+    def _stop_locked(self, *, emit: bool = True) -> None:
         with self._lock:
             self._generation += 1
             stop_generation = self._generation
@@ -654,11 +776,17 @@ class Worker:
         with self._lock:
             if self._generation == stop_generation:
                 self._request_id = None
+                self._source = None
+
+    def stop(self, *, emit: bool = True) -> None:
+        with self._command_lock:
+            self._stop_locked(emit=emit)
 
     def shutdown(self) -> None:
-        with self._lock:
-            self._shutdown = True
-        self.stop(emit=False)
+        with self._command_lock:
+            with self._lock:
+                self._shutdown = True
+            self._stop_locked(emit=False)
         # Cold-idle eviction is a process lifecycle boundary.  Drop the
         # native session before leaving the stdin loop so ONNX Runtime can
         # release its allocators deterministically instead of waiting for
@@ -769,8 +897,15 @@ class Worker:
                 return
             sink = self._player_factory()
             with self._lock:
-                self._sink = sink
-            self._emit("speaking")
+                if self._shutdown or generation != self._generation:
+                    stale_sink = True
+                else:
+                    stale_sink = False
+                    self._sink = sink
+            if stale_sink:
+                sink.stop()
+                return
+            self._emit_generation(generation, "speaking")
             first_audio = True
             for chunk in sentence_chunks(text, target=self._chunk_target):
                 if not self._active(generation):
@@ -802,7 +937,7 @@ class Worker:
                                 # This remains metadata-only and allows the
                                 # benchmark to distinguish Piper's first audio
                                 # from the earlier "speaking" state.
-                                self._emit("speaking", audioStarted=True)
+                                self._emit_generation(generation, "speaking", audioStarted=True)
             if self._active(generation):
                 completed = True
         except RuntimeError as exc:
@@ -812,26 +947,35 @@ class Worker:
                 return
             code = str(exc)
             if code in ACCELERATOR_ERROR_CODES:
-                self._emit("error", code)
+                self._emit_generation(generation, "error", code)
             elif code == "voice-model-missing":
-                self._emit("setup-required", code)
+                self._emit_generation(generation, "setup-required", code)
             elif code == "piper-runtime-unavailable":
-                self._emit("setup-required", "runtime-missing")
+                self._emit_generation(generation, "setup-required", "runtime-missing")
+            elif code in {
+                "audio-player-unavailable",
+                "audio-player-failed",
+                "voice-config-invalid",
+                "voice-unavailable",
+                "voice-load-failed",
+            }:
+                self._emit_generation(generation, "error", code)
             else:
-                self._emit("error", code if re.fullmatch(r"[a-z0-9-]+", code) else "synthesis-failed")
+                self._emit_generation(generation, "error", "synthesis-failed")
         except Exception:
             # Never serialize exception text: dependency errors can contain
             # command lines or user text.  The UI only needs an error code.
             if self._active(generation):
-                self._emit("error", "synthesis-failed")
+                self._emit_generation(generation, "error", "synthesis-failed")
         finally:
             if sink is not None:
                 with self._lock:
                     still_current = self._sink is sink
-                    if still_current:
-                        self._sink = None
                 if still_current:
                     sink.finish()
+                with self._lock:
+                    if self._sink is sink:
+                        self._sink = None
             with self._lock:
                 if generation == self._generation:
                     self._text = ""
@@ -840,21 +984,92 @@ class Worker:
             if completed and self._active(generation):
                 # Finish the PipeWire stream before advertising idle.  This
                 # keeps the bar state truthful while the final PCM drains.
-                self._emit("idle")
+                self._emit_generation(generation, "idle")
                 # Keep the request ID on the terminal event for correlation,
                 # then clear it so later unscoped status/speed events do not
                 # inherit a completed request's identifier.
                 with self._lock:
                     if generation == self._generation:
                         self._request_id = None
+                        self._source = None
             elif not completed:
                 with self._lock:
                     if generation == self._generation:
                         self._request_id = None
+                        self._source = None
+
+    # -------------------------------------------------------- agent transport
+
+    @staticmethod
+    def _agent_ack(
+        ok: bool,
+        *,
+        error: str = "",
+        event: str = "",
+        characters: Optional[int] = None,
+    ) -> bytes:
+        payload: dict[str, Any] = {
+            "protocolVersion": AGENT_PROTOCOL_VERSION,
+            "ok": bool(ok),
+        }
+        if ok:
+            payload["accepted"] = True
+            payload["event"] = event
+            payload["characters"] = int(characters or 0)
+        elif error:
+            payload["error"] = error
+        return (json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
+
+    def handle_agent_request(self, message: Any) -> bytes:
+        """Admit one explicit user-authorized agent announcement."""
+
+        with self._command_lock:
+            if not isinstance(message, dict):
+                return self._agent_ack(False, error="invalid-request")
+            if type(message.get("protocolVersion")) is not int or message.get("protocolVersion") != AGENT_PROTOCOL_VERSION:
+                return self._agent_ack(False, error="unsupported-protocol-version")
+            if message.get("command") != "announce":
+                return self._agent_ack(False, error="invalid-command")
+            with self._lock:
+                if self._status == "setup-required":
+                    return self._agent_ack(False, error="setup-required")
+                if self._is_busy_locked():
+                    return self._agent_ack(False, error="busy")
+
+            event = message.get("event")
+            if isinstance(event, str) and event in AGENT_EVENTS:
+                if "text" in message:
+                    return self._agent_ack(False, error="invalid-event")
+                text = AGENT_EVENTS[event]
+            elif event == "custom":
+                text = message.get("text")
+                if not isinstance(text, str):
+                    return self._agent_ack(False, error="invalid-text")
+                try:
+                    encoded = text.encode("utf-8")
+                except UnicodeEncodeError:
+                    return self._agent_ack(False, error="invalid-text")
+                if len(text) > MAX_AGENT_CHARS or len(encoded) > MAX_AGENT_TEXT_BYTES:
+                    return self._agent_ack(False, error="text-too-long")
+                if not cleanup_text(text, DEFAULT_CLEANUP_PROFILE).strip():
+                    return self._agent_ack(False, error="empty-text")
+            else:
+                return self._agent_ack(False, error="invalid-event")
+
+            accepted = self._read_selection_locked(
+                text,
+                None,
+                DEFAULT_CLEANUP_PROFILE,
+                source="agent",
+                interrupt=False,
+            )
+            if not accepted:
+                return self._agent_ack(False, error="busy")
+            return self._agent_ack(True, event=event, characters=len(text))
 
     # ---------------------------------------------------------- stdin loop
 
-    def handle(self, message: Any) -> bool:
+    def _handle_locked(self, message: Any) -> bool:
         """Handle one decoded JSON message.  Return false to shut down."""
 
         if not isinstance(message, dict):
@@ -891,18 +1106,35 @@ class Worker:
             self._emit("error", "invalid-command")
         return True
 
-    def run(self) -> int:
+    def handle(self, message: Any) -> bool:
+        """Handle one decoded stdin command.  Return false to shut down."""
+
+        with self._command_lock:
+            return self._handle_locked(message)
+
+    def run(self, socket_path: Optional[Path] = None) -> int:
+        agent_server: Optional[AgentSocketServer] = None
+        try:
+            if socket_path is not None:
+                agent_server = AgentSocketServer(self.handle_agent_request, socket_path)
+                agent_server.start()
+        except RuntimeError:
+            return 1
         self._emit_callback(self.status())
-        for line in sys.stdin:
-            try:
-                message = json.loads(line)
-            except (TypeError, json.JSONDecodeError):
-                self._emit("error", "invalid-command")
-                continue
-            if not self.handle(message):
-                break
-        self.shutdown()
-        return 0
+        try:
+            for line in sys.stdin:
+                try:
+                    message = json.loads(line)
+                except (TypeError, json.JSONDecodeError):
+                    self._emit("error", "invalid-command")
+                    continue
+                if not self.handle(message):
+                    break
+            return 0
+        finally:
+            self.shutdown()
+            if agent_server is not None:
+                agent_server.close()
 
 
 def self_test(model_path: Path, config_path: Optional[Path], backend: str = "cpu") -> int:
@@ -941,6 +1173,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--model", type=Path)
     parser.add_argument("--config", type=Path)
     parser.add_argument(
+        "--socket",
+        type=Path,
+        help="private Unix socket for explicit agent announcements",
+    )
+    parser.add_argument(
         "--chunk-target",
         type=int,
         default=CHUNK_TARGET,
@@ -977,7 +1214,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         backend=args.backend,
         player_factory=DiscardAudioSink if args.discard_audio else None,
     )
-    return worker.run()
+    return worker.run(args.socket)
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised by protocol tests

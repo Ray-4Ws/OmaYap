@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+"""Make one explicit, user-authorized announcement through OmaYap.
+
+Fixed events use fixed speech.  Custom speech is accepted only from stdin;
+neither text nor dependency diagnostics are placed in argv, logs, or output.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import socket
+import subprocess
+import sys
+import time
+from typing import Any, Optional
+
+
+PROTOCOL_VERSION = 1
+MAX_CHARS = 20_000
+MAX_TEXT_BYTES = MAX_CHARS * 4
+MAX_FRAME_BYTES = 128 * 1024
+CONNECT_TIMEOUT = 1.0
+RESPONSE_TIMEOUT = 3.0
+CONNECT_DEADLINE = 5.0
+EVENTS = {
+    "task-complete": "Task complete.",
+    "input-needed": "Input needed.",
+    "permission-needed": "Permission needed.",
+    "error": "An error occurred.",
+}
+ERROR_CODES = frozenset(
+    {
+        "ack-invalid",
+        "busy",
+        "empty-text",
+        "invalid-command",
+        "invalid-event",
+        "invalid-frame",
+        "invalid-request",
+        "invalid-text",
+        "payload-too-large",
+        "peer-not-authorized",
+        "prepare-failed",
+        "request-failed",
+        "setup-required",
+        "socket-active",
+        "socket-bind-failed",
+        "socket-directory-missing",
+        "socket-directory-unsafe",
+        "socket-path-unsafe",
+        "socket-read-failed",
+        "socket-timeout",
+        "stdin-invalid-utf8",
+        "stdin-read-failed",
+        "stdin-too-large",
+        "text-too-long",
+        "unsupported-protocol-version",
+        "worker-unavailable",
+    }
+)
+
+
+def _error(code: str) -> None:
+    """Write one compact fixed diagnostic; never echo a path or text value."""
+
+    safe = code if code in ERROR_CODES else "request-failed"
+    sys.stderr.write(f"error:{safe}\n")
+    sys.stderr.flush()
+
+
+def _parse_args(argv: list[str]) -> tuple[Optional[str], Optional[Path], bool]:
+    """Parse control-only arguments without displaying unknown values."""
+
+    event: Optional[str] = None
+    socket_path: Optional[Path] = None
+    index = 0
+    while index < len(argv):
+        argument = argv[index]
+        if argument in {"-h", "--help"} and len(argv) == 1:
+            sys.stdout.write("Usage: bin/yap [--event EVENT] [--socket PATH]\n")
+            sys.stdout.write("With no event, read custom speech from stdin.\n")
+            return None, None, True
+        if argument == "--event" and index + 1 < len(argv):
+            index += 1
+            value = argv[index]
+        elif argument.startswith("--event="):
+            value = argument[8:]
+        else:
+            value = None
+        if value is not None:
+            if event is not None or value not in EVENTS:
+                return "__invalid__", None, False
+            event = value
+            index += 1
+            continue
+        if argument == "--socket" and index + 1 < len(argv):
+            index += 1
+            value = argv[index]
+        elif argument.startswith("--socket="):
+            value = argument[9:]
+        else:
+            value = None
+        if value is not None:
+            if socket_path is not None or not value or "\x00" in value:
+                return "__invalid__", None, False
+            socket_path = Path(value)
+            index += 1
+            continue
+        return "__invalid__", None, False
+    return event, socket_path, False
+
+
+def _read_stdin() -> Optional[str]:
+    try:
+        raw = sys.stdin.buffer.read(MAX_TEXT_BYTES + 1)
+    except (OSError, ValueError):
+        _error("stdin-read-failed")
+        return None
+    if len(raw) > MAX_TEXT_BYTES:
+        _error("stdin-too-large")
+        return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        _error("stdin-invalid-utf8")
+        return None
+    if len(text) > MAX_CHARS:
+        _error("stdin-too-large")
+        return None
+    if not text.strip():
+        _error("empty-text")
+        return None
+    return text
+
+
+def _fallback_socket_path() -> Path:
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    if runtime:
+        return Path(runtime) / "omayap-read-aloud.sock"
+    data_home = os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local/share")
+    return Path(data_home) / "omayap-read-aloud" / "yaps.sock"
+
+
+def _prepare_external() -> Optional[Path]:
+    try:
+        completed = subprocess.run(
+            ["omarchy-shell", "omayap.read-aloud", "prepareExternal"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=2.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        _error("prepare-failed")
+        return None
+    try:
+        raw: Any = json.loads(completed.stdout.decode("utf-8"))
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        _error("prepare-failed")
+        return None
+    if not isinstance(raw, dict):
+        _error("prepare-failed")
+        return None
+    if raw.get("ok") is not True:
+        error = raw.get("error") if isinstance(raw.get("error"), str) else "worker-unavailable"
+        _error(error)
+        return None
+    if type(raw.get("protocolVersion")) is not int or raw.get("protocolVersion") != PROTOCOL_VERSION:
+        _error("unsupported-protocol-version")
+        return None
+    candidate = raw.get("socket")
+    if not isinstance(candidate, str) or not candidate or len(candidate) > 4096:
+        _error("prepare-failed")
+        return None
+    if "\x00" in candidate or not candidate.startswith("/"):
+        _error("prepare-failed")
+        return None
+    if Path(candidate) != _fallback_socket_path():
+        _error("prepare-failed")
+        return None
+    return Path(candidate)
+
+
+def _request(path: Path, payload: bytes) -> tuple[Optional[dict[str, Any]], str]:
+    """Connect with bounded setup retries, then send exactly once."""
+
+    deadline = time.monotonic() + CONNECT_DEADLINE
+    connection: Optional[socket.socket] = None
+    while time.monotonic() < deadline:
+        try:
+            connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            connection.settimeout(CONNECT_TIMEOUT)
+            connection.connect(str(path))
+            break
+        except (OSError, socket.timeout):
+            if connection is not None:
+                connection.close()
+            connection = None
+            time.sleep(0.05)
+    if connection is None:
+        return None, "worker-unavailable"
+    try:
+        try:
+            # Once this call begins, this request must never be retried: the
+            # peer may already have admitted speech even if its reply fails.
+            connection.sendall(payload)
+        except OSError:
+            return None, "request-failed"
+        connection.settimeout(RESPONSE_TIMEOUT)
+        data = bytearray()
+        while len(data) <= 4096:
+            piece = connection.recv(min(4096, 4097 - len(data)))
+            if not piece:
+                break
+            data.extend(piece)
+            if b"\n" in piece:
+                break
+        line = bytes(data).split(b"\n", 1)[0]
+        parsed = json.loads(line.decode("utf-8"))
+        if not isinstance(parsed, dict):
+            return None, "ack-invalid"
+        return parsed, ""
+    except (OSError, socket.timeout, UnicodeDecodeError, json.JSONDecodeError):
+        return None, "request-failed"
+    finally:
+        connection.close()
+
+
+def _validate_ack(ack: dict[str, Any], requested_event: str, characters: int) -> tuple[bool, str]:
+    if type(ack.get("protocolVersion")) is not int or ack.get("protocolVersion") != PROTOCOL_VERSION:
+        return False, "ack-invalid"
+    if ack.get("ok") is True:
+        if (
+            ack.get("accepted") is not True
+            or ack.get("event") != requested_event
+            or type(ack.get("characters")) is not int
+            or ack.get("characters") != characters
+        ):
+            return False, "ack-invalid"
+        return True, ""
+    error = ack.get("error")
+    return False, error if isinstance(error, str) else "ack-invalid"
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    event, override, help_only = _parse_args(list(sys.argv[1:] if argv is None else argv))
+    if help_only:
+        return 0
+    if event == "__invalid__":
+        _error("invalid-command")
+        return 2
+
+    if event is None:
+        text = _read_stdin()
+        if text is None:
+            return 2
+        requested_event = "custom"
+        characters = len(text)
+        request: dict[str, Any] = {
+            "protocolVersion": PROTOCOL_VERSION,
+            "command": "announce",
+            "event": requested_event,
+            "text": text,
+        }
+    else:
+        requested_event = event
+        characters = len(EVENTS[event])
+        request = {
+            "protocolVersion": PROTOCOL_VERSION,
+            "command": "announce",
+            "event": event,
+        }
+    try:
+        payload = (json.dumps(request, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    except (UnicodeEncodeError, ValueError):
+        _error("invalid-text")
+        return 2
+    if len(payload) > MAX_FRAME_BYTES:
+        _error("stdin-too-large")
+        return 2
+
+    path = override if override is not None else _prepare_external()
+    if path is None:
+        return 1
+    if not path.is_absolute():
+        _error("socket-path-unsafe")
+        return 2
+    ack, request_error = _request(path, payload)
+    if ack is None:
+        _error(request_error)
+        return 1
+    ok, error = _validate_ack(ack, requested_event, characters)
+    if not ok:
+        _error(error)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

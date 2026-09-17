@@ -12,7 +12,7 @@ Item {
   property string omarchyPath: ""
 
   readonly property string pluginId: "omayap.read-aloud"
-  readonly property string pluginVersion: "1.6.1"
+  readonly property string pluginVersion: "1.6.2"
   readonly property int workerProtocolVersion: 1
   readonly property int maxWorkerRequestIdChars: 128
   readonly property string defaultVoiceName: "en_US-lessac-medium"
@@ -37,6 +37,11 @@ Item {
   readonly property string configHome: Quickshell.env("XDG_CONFIG_HOME") || (home + "/.config")
   readonly property string dataHome: Quickshell.env("XDG_DATA_HOME") || (home + "/.local/share")
   readonly property string dataRoot: dataHome + "/omayap-read-aloud"
+  readonly property string externalSocketPath: (Quickshell.env("XDG_RUNTIME_DIR") || dataRoot)
+    + (Quickshell.env("XDG_RUNTIME_DIR") ? "/omayap-read-aloud.sock" : "/yaps.sock")
+  property bool agentIndicatorEnabled: false
+  property bool agentAudioStarted: false
+  readonly property bool agentSpeaking: agentAudioStarted && status === "speaking"
   readonly property string settingsPath: configHome + "/omayap-read-aloud/settings.json"
   readonly property string settingsStorePath: pluginRoot + "/share/settings_store.py"
   property string modelPath: dataRoot + "/models/en_US-lessac-medium.onnx"
@@ -588,6 +593,8 @@ Item {
       speed: Number(root.speed.toFixed(3)),
       cleanupProfile: root.cleanupProfile,
       backend: root.backend,
+      agentSpeaking: root.agentSpeaking,
+      agentIndicatorEnabled: root.agentIndicatorEnabled,
       characters: root.characterCount,
       voice: root.voiceName,
       setupRequired: root.setupRequired,
@@ -601,6 +608,8 @@ Item {
       if (parsed && parsed.speed !== undefined) root.speed = root.clampSpeed(parsed.speed)
       if (parsed && parsed.cleanupProfile !== undefined)
         root.cleanupProfile = root.validCleanupProfile(parsed.cleanupProfile)
+      if (parsed && typeof parsed.agentIndicatorEnabled === "boolean")
+        root.agentIndicatorEnabled = parsed.agentIndicatorEnabled
       // Older settings files have no backend key and intentionally remain
       // CPU-only. Invalid values are also rejected to keep the worker argv
       // fixed to the three documented backend choices.
@@ -642,9 +651,15 @@ Item {
     root.pendingSettingsPayload = JSON.stringify({
       speed: Number(root.speed.toFixed(3)),
       cleanupProfile: root.cleanupProfile,
-      backend: root.backend
+      backend: root.backend,
+      agentIndicatorEnabled: root.agentIndicatorEnabled
     })
     root.startSettingsWrite()
+  }
+
+  function setAgentIndicator(enabled) {
+    root.agentIndicatorEnabled = Boolean(enabled)
+    root.persistSettings()
   }
 
   // Retain the old helper name for the speed/cleanup callers and external
@@ -860,7 +875,8 @@ Item {
         root.pluginRoot + "/worker/worker.py",
         "--backend", root.backend,
         "--model", root.modelPath,
-        "--config", root.modelConfigPath
+        "--config", root.modelConfigPath,
+        "--socket", root.externalSocketPath
       ]
       workerProc.running = true
       return
@@ -901,6 +917,11 @@ Item {
       return
     }
     if (root.stopPending) root.stopPending = false
+
+    if (parsed.source !== "agent" || nextStatus !== "speaking")
+      root.agentAudioStarted = false
+    else if (parsed.audioStarted === true)
+      root.agentAudioStarted = true
 
     root.characterCount = Math.max(0, Number(parsed.characters || 0))
     root.errorCode = String(parsed.errorCode || "")
@@ -990,6 +1011,7 @@ Item {
   }
 
   function stop() {
+    root.agentAudioStarted = false
     if (root.stopPending) return
     workerIdleTimer.stop()
     root.cancelOcr()
@@ -1475,6 +1497,7 @@ Item {
     onExited: function(exitCode) {
       workerIdleTimer.stop()
       workerEvictionKillTimer.stop()
+      root.agentAudioStarted = false
       root.workerOutputSuppressed = true
       if (root.expectedWorkerExit) {
         // Normal cold-idle eviction is not an error.  The service itself stays
@@ -1763,6 +1786,17 @@ Item {
 
     function status(): string {
       return root.statusJson()
+    }
+
+    function prepareExternal(): string {
+      if (root.setupRequired) return JSON.stringify({ok: false, error: "setup-required"})
+      if (["idle", "error"].indexOf(root.status) === -1 || root.captureStage !== "idle" || root.ocrBusy
+          || root.stopPending || root.voiceActionsBusy || root.expectedWorkerExit
+          || root.workerReplacementPending || root.backendSwitchPending)
+        return JSON.stringify({ok: false, error: "busy"})
+      root.workerCommand({command: "status"})
+      return JSON.stringify({ok: true, protocolVersion: root.workerProtocolVersion,
+        socket: root.externalSocketPath})
     }
   }
 

@@ -7,6 +7,15 @@ boundary.
 
 ## Transport
 
+Agent announcements use the optional private Unix socket owned by the same
+worker. `prepareExternal` shell IPC only returns its path and protocol version;
+speech text is sent by `bin/yap` through the socket from stdin. The socket
+accepts only same-UID peers and refuses announcements while speech is busy.
+State events include `source: "agent"` for these requests and `"selection"`
+for ordinary requests. The robot indicator waits for `audioStarted: true`;
+source attribution ends when the request finishes or is cancelled. Source is
+a routing label, not proof of which AI product invoked the local client.
+
 The backend is a child process. Requests are UTF-8 JSON objects, one object per
 newline, on stdin. Responses are UTF-8 JSON objects, one object per newline, on
 stdout. A backend must not write diagnostics to stdout; stderr is not consumed

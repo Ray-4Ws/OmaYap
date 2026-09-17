@@ -86,6 +86,15 @@ class SettingsStoreTests(unittest.TestCase):
             self.assertTrue(path.is_symlink())
             self.assertEqual(outside.read_bytes(), b"do not replace")
 
+    def test_indicator_boolean_round_trip_and_invalid_type_preserves_settings(self):
+        with TemporaryDirectory() as directory:
+            path = self.private_settings_path(directory)
+            payload = b'{"speed":1.0,"cleanupProfile":"safe","backend":"gpu","agentIndicatorEnabled":true}'
+            self.assertEqual(self.run_store("write", path, payload).returncode, 0)
+            self.assertEqual(self.run_store("read", path).stdout, payload + b'\n')
+            self.assertNotEqual(self.run_store("write", path, payload.replace(b'true', b'"yes"')).returncode, 0)
+            self.assertEqual(self.run_store("read", path).stdout, payload + b'\n')
+
     def test_fifo_is_rejected_without_blocking(self):
         with TemporaryDirectory() as directory:
             path = self.private_settings_path(directory)
