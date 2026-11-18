@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import re
+import string
 import subprocess
 import sys
 import threading
@@ -112,6 +113,9 @@ def normalize_text(text: str) -> str:
 
 
 _REMOVED_SAFE_CHARACTERS = frozenset("\u00ad\u200b\u2060\ufeff")
+_FULLWIDTH_PUNCTUATION = str.maketrans(
+    {chr(ord(character) + 0xFEE0): character for character in string.punctuation}
+)
 _SPEECH_PUNCTUATION_REPLACEMENTS = {
     "!": ".",
     "\u00a1": " ",
@@ -160,17 +164,20 @@ _ARTICLE_CITATION_RE = re.compile(
 _ARTICLE_OPERATOR_CHARACTERS = frozenset("=([{,:;+-*/%")
 
 
+def _clean_spacing(text: str) -> str:
+    text = re.sub(r" {2,}", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip(" \n")
+
+
 def _safe_cleanup(text: str) -> str:
-    """Remove known speech-hostile controls while preserving linguistic marks."""
+    """Normalize whitespace and remove controls while preserving line boundaries."""
 
     cleaned: list[str] = []
-    for character in normalize_text(text):
+    for character in text:
         if character in _REMOVED_SAFE_CHARACTERS:
             continue
-        if character == "\n":
-            cleaned.append("\n")
-            continue
-        if character in "\u2028\u2029":
+        if character in "\n\u2028\u2029":
             cleaned.append("\n")
             continue
         if character == "\t":
@@ -185,14 +192,7 @@ def _safe_cleanup(text: str) -> str:
             continue
         cleaned.append(character)
 
-    value = "".join(cleaned)
-    value = re.sub(r" {2,}", " ", value)
-    value = re.sub(r" +([,.;:!?])", r"\1", value)
-    value = re.sub(r" *(\n+) *", r"\1", value).strip(" \n")
-    # Keep structural line breaks until synthesis. The worker splits on them
-    # so Piper never receives speech-hostile literal newlines, then inserts a
-    # deterministic PCM pause that does not depend on voice prosody.
-    return value.strip(" ")
+    return _clean_spacing("".join(cleaned))
 
 
 def _article_citation_is_adjacent(value: str, match: re.Match[str]) -> bool:
@@ -339,7 +339,7 @@ def _article_cleanup(text: str) -> str:
     if removed_citation:
         # These repairs apply only when citation removal created the artifact;
         # article mode must not rewrite repeated punctuation in ordinary text.
-        value = re.sub(r",\s*,+", ",", value)
+        value = re.sub(r", *,+", ",", value)
         value = re.sub(r" +([,.;:!?])", r"\1", value)
     return value
 
@@ -352,10 +352,14 @@ def cleanup_text(text: str, profile: str = DEFAULT_CLEANUP_PROFILE) -> str:
     normalized = normalize_text(text)
     if profile == "off":
         return normalized
-    normalized = _decode_escaped_newlines(_decode_escaped_speech_characters(normalized))
+    decoded = _decode_escaped_newlines(_decode_escaped_speech_characters(normalized))
+    cleaned = _safe_cleanup(decoded.translate(_FULLWIDTH_PUNCTUATION))
     if profile == "article":
-        normalized = _article_cleanup(normalized)
-    return _safe_cleanup(_speech_punctuation_cleanup(normalized))
+        # Citation ranges can contain Unicode dashes. Match them before
+        # the speech pass turns those dashes into pauses.
+        cleaned = _article_cleanup(cleaned)
+    spoken = _speech_punctuation_cleanup(cleaned)
+    return _clean_spacing(re.sub(r" +([,.;:!?])", r"\1", spoken))
 
 
 def _sentence_boundary(text: str, start: int, end: int) -> int:

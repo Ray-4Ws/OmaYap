@@ -273,6 +273,23 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(cleanup_text("Sentence[1][2] continues", "article"), "Sentence continues")
         self.assertEqual(cleanup_text("Hello,, world", "article"), "Hello,, world")
 
+    def test_article_cleanup_normalizes_horizontal_whitespace_before_matching_citations(self):
+        for space in ("\u00a0", "\u2007", "\u202f", "\u3000", "\t"):
+            with self.subTest(space=space):
+                text = f"Sentence{space}[1–3].\n\nValues ={space}[1, 2]"
+                self.assertEqual(cleanup_text(text, "article"), "Sentence.\n\nValues = [1, 2]")
+        self.assertEqual(cleanup_text("A\u00a0[1]", "article"), "A")
+        self.assertEqual(cleanup_text("Sentence\n[1]", "article"), "Sentence\n[1]")
+
+    def test_fullwidth_punctuation_uses_the_same_cleanup_as_ascii(self):
+        text = "Ready？ Hello！ 1／2 50％ ［a］ ＋ ＄ １２３"
+        expected = "Ready? Hello. 1/2 50% [a] + $ １２３"
+        for profile in ("safe", "article"):
+            with self.subTest(profile=profile):
+                self.assertEqual(cleanup_text(text, profile), expected)
+                self.assertEqual(cleanup_text(r"Ready\uff1f 50\U0000ff05", profile), "Ready? 50%")
+        self.assertEqual(cleanup_text(text, "off"), text)
+
     def test_cleanup_limit_is_applied_before_cleanup(self):
         worker, voice, _sink, events = self.make_worker()
         worker.read_selection("\u00ad" * (MAX_CHARS + 1), cleanup_profile="article")
