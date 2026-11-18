@@ -195,7 +195,14 @@ Item {
   }
 
   function acceleratorVoiceSupported() {
-    return root.validVoiceId(root.voiceName)
+    return root.validVoiceId(root.voiceName) && root.voiceName.endsWith("-medium")
+  }
+
+  function resetUnsupportedBackend() {
+    if (root.backend === "cpu" || root.acceleratorVoiceSupported()) return
+    root.backend = "cpu"
+    root.persistSettings()
+    root.notify("OmaYap backend reset", "This voice cannot use acceleration; CPU has been selected.")
   }
 
   function acceleratorErrorDescription(code) {
@@ -355,6 +362,7 @@ Item {
     root.modelPath = base + ".onnx"
     root.modelConfigPath = base + ".onnx.json"
     root.modelCardPath = base + ".MODEL_CARD"
+    root.resetUnsupportedBackend()
     return true
   }
 
@@ -614,14 +622,8 @@ Item {
       // CPU-only. Invalid values are also rejected to keep the worker argv
       // fixed to the three documented backend choices.
       if (parsed && parsed.backend !== undefined) {
-        var requestedBackend = root.validBackend(parsed.backend)
-        if (requestedBackend !== "cpu" && !root.acceleratorVoiceSupported()) {
-          root.backend = "cpu"
-          root.persistSettings()
-          root.notify("OmaYap backend reset", "This voice cannot use acceleration; CPU has been selected.")
-        } else {
-          root.backend = requestedBackend
-        }
+        root.backend = root.validBackend(parsed.backend)
+        root.resetUnsupportedBackend()
       }
     } catch (error) {
       // A malformed settings file is recoverable.  Keep the default speed and
