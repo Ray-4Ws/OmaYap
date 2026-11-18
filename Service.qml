@@ -16,7 +16,7 @@ Item {
   readonly property int workerProtocolVersion: 1
   readonly property int maxWorkerRequestIdChars: 128
   readonly property string defaultVoiceName: "en_US-lessac-medium"
-  readonly property var supportedVoiceIds: ["en_US-lessac-medium", "en_US-kristin-medium", "en_US-john-medium", "en_GB-alba-medium"]
+  readonly property var supportedVoiceIds: ["en_US-lessac-medium", "en_US-lessac-high", "en_US-kristin-medium", "en_US-john-medium", "en_GB-alba-medium", "en_GB-cori-high", "en_US-ljspeech-high", "en_US-ryan-high"]
   // The selected ID and paths are mutable only through validated manager
   // metadata. They are kept as explicit properties so a worker replacement
   // observes one consistent model/config pair.
@@ -195,7 +195,14 @@ Item {
   }
 
   function acceleratorVoiceSupported() {
-    return root.validVoiceId(root.voiceName)
+    return root.validVoiceId(root.voiceName) && root.voiceName.endsWith("-medium")
+  }
+
+  function resetUnsupportedBackend() {
+    if (root.backend === "cpu" || root.acceleratorVoiceSupported()) return
+    root.backend = "cpu"
+    root.persistSettings()
+    root.notify("OmaYap backend reset", "This voice cannot use acceleration; CPU has been selected.")
   }
 
   function acceleratorErrorDescription(code) {
@@ -355,6 +362,7 @@ Item {
     root.modelPath = base + ".onnx"
     root.modelConfigPath = base + ".onnx.json"
     root.modelCardPath = base + ".MODEL_CARD"
+    root.resetUnsupportedBackend()
     return true
   }
 
@@ -614,14 +622,8 @@ Item {
       // CPU-only. Invalid values are also rejected to keep the worker argv
       // fixed to the three documented backend choices.
       if (parsed && parsed.backend !== undefined) {
-        var requestedBackend = root.validBackend(parsed.backend)
-        if (requestedBackend !== "cpu" && !root.acceleratorVoiceSupported()) {
-          root.backend = "cpu"
-          root.persistSettings()
-          root.notify("OmaYap backend reset", "This voice cannot use acceleration; CPU has been selected.")
-        } else {
-          root.backend = requestedBackend
-        }
+        root.backend = root.validBackend(parsed.backend)
+        root.resetUnsupportedBackend()
       }
     } catch (error) {
       // A malformed settings file is recoverable.  Keep the default speed and

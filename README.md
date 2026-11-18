@@ -65,9 +65,9 @@ read starts a fresh worker with the saved speed.
 - Left-click the bar icon to read the selection, or to stop active playback.
 - Hover over the bar icon for its current status and left/right-click actions.
   Right-click it for the voice selector, character count, and the
-  `0.5×–2.0×` speed slider. The voice dropdown contains the four checked-in
-  official Piper choices: Lessac, Kristin, John, and Alba. It shows each
-  voice's US/UK region, medium quality, and approximate download size. Choosing
+  `0.5×–2.0×` speed slider. The searchable voice dropdown offers four Medium
+  voices and four High voices (Cori, Lessac, LJSpeech, and Ryan). It shows each
+  voice's region, quality, and approximate download size. Choosing
   an uninstalled voice downloads its three files, verifies their pinned sizes
   and SHA-256 checks, and selects it automatically. The selected voice is
   persisted in the private `selected-voice` state file. A voice can be changed only while
@@ -76,7 +76,9 @@ read starts a fresh worker with the saved speed.
   seconds. Speed changes are persisted in
   `~/.config/omayap-read-aloud/settings.json` and affect the next chunk. The
   same popup selects the reading cleanup profile: **Safe** (the default),
-  **Off**, or **Article**.
+  **Off**, or **Article**. Safe normalizes Unicode punctuation for Piper and
+  adds pauses at line and paragraph breaks. Article also removes common
+  citation markers attached to prose.
 - Use **Ctrl+F10** or the bar popup's **Read text from screen (OCR)** action to
   run Omarchy's installed local screen-text capture. It does not modify
   CLIPBOARD; the native OCR language setting is inherited from
@@ -99,9 +101,10 @@ widget defaults to the right section and cannot be duplicated.
 ### Backend selection (local development branch)
 
 The bar menu's **Backend** selector offers **CPU only**, **CPU + NPU**, and
-**GPU**. CPU is the default. All four catalog voices—Lessac, Kristin, John,
-and Alba—can use either accelerated option. Each exact model and configuration
-is checksum-pinned; there are no extra voice downloads.
+**GPU**. CPU is the default and supports all eight voices. Choosing a High
+voice switches the backend to **CPU only**. The four Medium voices can use
+either accelerated option with their existing checksum-pinned model and
+configuration.
 
 CPU uses the existing low-memory ONNX Runtime path. CPU + NPU uses CPU for
 text/duration processing and the Intel NPU for waveform generation, with
@@ -119,8 +122,7 @@ settings files without a backend field default to CPU.
 The first accelerated read can take several seconds to load/compile, and GPU
 inference may prepare additional kernels for a new input size. Acceleration
 can increase retained memory; it is not a memory-saving switch. Support has
-been checked on an Intel Core Ultra 7 255H. Other GPU vendors and Piper voices
-outside the four-item catalog have not been validated. See
+been checked on an Intel Core Ultra 7 255H with the four Medium voices. See
 [backend details](docs/accelerated-backends.md).
 
 ## Agent announcements
@@ -216,13 +218,17 @@ marketplace. OCR remains local to Omarchy's installed capture tools; it does
 not upload screenshots or recognized text. The checked-in catalog and its
 official links are in [`share/voices.json`](share/voices.json). The voice
 files are distributed by the official [Piper voice repository](https://huggingface.co/rhasspy/piper-voices).
-For clear attribution and terms disclosure, the four shipped choices link to
+For clear attribution and terms disclosure, the eight shipped choices link to
 their official model cards and dataset terms here:
 
 - [Lessac medium model card](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/lessac/medium/MODEL_CARD) · [Blizzard Challenge 2013 license](https://www.cstr.ed.ac.uk/projects/blizzard/2013/lessac_blizzard2013/license.html)
+- [Lessac high model card](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/lessac/high/MODEL_CARD) · [Blizzard Challenge 2013 license](https://www.cstr.ed.ac.uk/projects/blizzard/2013/lessac_blizzard2013/license.html)
 - [Kristin medium model card](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/kristin/medium/MODEL_CARD) · [LibriVox public-domain terms](https://librivox.org)
 - [John medium model card](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/john/medium/MODEL_CARD) · [LibriVox public-domain terms](https://librivox.org)
 - [Alba medium model card](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_GB/alba/medium/MODEL_CARD) · [Creative Commons Attribution 4.0 terms](https://creativecommons.org/licenses/by/4.0/)
+- [Cori high model card](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_GB/cori/high/MODEL_CARD) · [LibriVox public-domain terms](https://librivox.org)
+- [LJSpeech high model card](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/ljspeech/high/MODEL_CARD) · [LJ Speech public-domain terms](https://keithito.com/LJ-Speech-Dataset/)
+- [Ryan high model card](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/ryan/high/MODEL_CARD) · [Creative Commons BY-NC-SA 4.0 terms](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
 Piper's runtime documentation is available in the official
 [OHF-Voice/piper1-gpl repository](https://github.com/OHF-Voice/piper1-gpl).

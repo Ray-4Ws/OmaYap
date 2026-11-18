@@ -87,11 +87,17 @@ text after the selected profile is applied is rejected with
 only the existing line-ending and NFC normalization. `safe` additionally
 maps Unicode horizontal/paragraph whitespace, removes C0/C1 controls except
 meaningful tab/newline whitespace, removes soft hyphen, zero-width space,
-word joiner, and BOM, and collapses excessive whitespace. It preserves ZWNJ,
-ZWJ, bidi marks/isolates, combining marks, and variation selectors. `article`
-adds conservative removal of adjacent MediaWiki-style numeric, note, and
-`citation needed` markers; it does not remove arbitrary bracketed prose,
-standalone arrays, math subscripts, or code-like markers.
+word joiner, and BOM, and normalizes Unicode punctuation for Piper. Fullwidth
+punctuation takes the ASCII form before speech cleanup, so a fraction keeps
+its slash and a percentage keeps its percent sign. Exclamation marks become
+periods. In copied text, Safe decodes literal `\uNNNN` and `\UNNNNNNNN`
+escapes for punctuation, symbols, and line breaks. Other Unicode escapes and
+linguistic marks such as ZWNJ, ZWJ, bidi marks, combining marks, and variation
+selectors are preserved. The worker inserts 400 ms of silence between lines
+and 900 ms between paragraphs, including when copied line breaks arrived as
+literal escapes. `article` also removes adjacent MediaWiki-style numeric,
+note, and `citation needed` markers after horizontal whitespace is normalized.
+Standalone arrays, math subscripts, and code-like markers are preserved.
 
 `requestId` is optional. When present it must be a non-empty string of at most
 128 Unicode code points. It is opaque to the backend and must not be parsed as

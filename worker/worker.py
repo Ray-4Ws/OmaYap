@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import re
+import string
 import subprocess
 import sys
 import threading
@@ -46,6 +47,8 @@ MAX_SPEED = 2.0
 DEFAULT_SPEED = 1.0
 VOICE_NAME = "en_US-lessac-medium"
 CHUNK_TARGET = 800
+LINE_PAUSE_MS = 400
+PARAGRAPH_PAUSE_MS = 900
 PROTOCOL_VERSION = 1
 MAX_REQUEST_ID_CHARS = 128
 CLEANUP_PROFILES = ("off", "safe", "article")
@@ -110,6 +113,49 @@ def normalize_text(text: str) -> str:
 
 
 _REMOVED_SAFE_CHARACTERS = frozenset("\u00ad\u200b\u2060\ufeff")
+_FULLWIDTH_PUNCTUATION = str.maketrans(
+    {chr(ord(character) + 0xFEE0): character for character in string.punctuation}
+)
+_SPEECH_PUNCTUATION_REPLACEMENTS = {
+    "!": ".",
+    "\u00a1": " ",
+    "\u00ab": '"',
+    "\u00bb": '"',
+    "\u00bf": " ",
+    "\u2010": ", ",
+    "\u2011": ", ",
+    "\u2012": ", ",
+    "\u2013": ", ",
+    "\u2014": ", ",
+    "\u2015": ", ",
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201a": "'",
+    "\u201b": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u201e": '"',
+    "\u201f": '"',
+    "\u2026": "...",
+    "\u2032": "'",
+    "\u2033": '"',
+    "\u3001": ",",
+    "\u3002": ".",
+}
+_SPEECH_SYMBOL_REPLACEMENTS = {
+    "\u2190": ", ",
+    "\u2191": ", ",
+    "\u2192": ", ",
+    "\u2193": ", ",
+    "\u2194": ", ",
+    "\u21d0": ", ",
+    "\u21d2": ", ",
+    "\u21d4": ", ",
+}
+_ESCAPED_UNICODE_RE = re.compile(r"\\(?:u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8}))")
+_ESCAPED_NEWLINE_RE = re.compile(
+    r"\\(?:r\\n|[nr]|u(?:000[aAdD]|202[89])|U0000(?:000[aAdD]|202[89]))"
+)
 _ARTICLE_NUMBER = r"\d+(?:\s*(?:[-–—]|to)\s*\d+|\s*,\s*\d+)*"
 _ARTICLE_CITATION_RE = re.compile(
     rf"(?P<space>[ \t]*)\[(?P<body>(?:{_ARTICLE_NUMBER}|notes?\s+{_ARTICLE_NUMBER}|citation\s+needed))\]",
@@ -118,17 +164,20 @@ _ARTICLE_CITATION_RE = re.compile(
 _ARTICLE_OPERATOR_CHARACTERS = frozenset("=([{,:;+-*/%")
 
 
+def _clean_spacing(text: str) -> str:
+    text = re.sub(r" {2,}", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip(" \n")
+
+
 def _safe_cleanup(text: str) -> str:
-    """Remove known speech-hostile controls while preserving linguistic marks."""
+    """Normalize whitespace and remove controls while preserving line boundaries."""
 
     cleaned: list[str] = []
-    for character in normalize_text(text):
+    for character in text:
         if character in _REMOVED_SAFE_CHARACTERS:
             continue
-        if character == "\n":
-            cleaned.append("\n")
-            continue
-        if character in "\u2028\u2029":
+        if character in "\n\u2028\u2029":
             cleaned.append("\n")
             continue
         if character == "\t":
@@ -143,11 +192,7 @@ def _safe_cleanup(text: str) -> str:
             continue
         cleaned.append(character)
 
-    value = "".join(cleaned)
-    value = re.sub(r" {2,}", " ", value)
-    value = re.sub(r" *\n *", "\n", value)
-    value = re.sub(r"\n{3,}", "\n\n", value)
-    return value.strip(" \n")
+    return _clean_spacing("".join(cleaned))
 
 
 def _article_citation_is_adjacent(value: str, match: re.Match[str]) -> bool:
@@ -216,6 +261,70 @@ def _article_citation_is_adjacent(value: str, match: re.Match[str]) -> bool:
     return bool(token)
 
 
+def _speech_punctuation_cleanup(value: str) -> str:
+    """Make punctuation predictable for Piper without changing word text."""
+
+    # English Piper voices are most reliable with ASCII punctuation. Preserve
+    # prosody by mapping punctuation roles to pauses and structural ASCII,
+    # rather than simply deleting characters that the phonemizer may spell as
+    # Unicode escapes.
+    cleaned: list[str] = []
+    for character in value:
+        replacement = _SPEECH_PUNCTUATION_REPLACEMENTS.get(character)
+        if replacement is None:
+            replacement = _SPEECH_SYMBOL_REPLACEMENTS.get(character)
+        if replacement is None and "ARROW" in unicodedata.name(character, ""):
+            replacement = ", "
+        if replacement is not None:
+            cleaned.append(replacement)
+        elif not character.isascii() and unicodedata.category(character).startswith("P"):
+            category = unicodedata.category(character)
+            if category == "Ps":
+                cleaned.append("(")
+            elif category == "Pe":
+                cleaned.append(")")
+            elif category in {"Pi", "Pf"}:
+                cleaned.append('"')
+            elif category == "Pd":
+                cleaned.append(", ")
+            else:
+                cleaned.append(", ")
+        elif not character.isascii() and unicodedata.category(character).startswith("S"):
+            # A Piper voice can spell unknown symbols (currency, math,
+            # dingbats, and emoji) as Unicode names or emit garbled audio.
+            cleaned.append(", ")
+        else:
+            cleaned.append(character)
+    return "".join(cleaned)
+
+
+def _decode_escaped_speech_characters(value: str) -> str:
+    """Decode only literal Unicode escapes that require speech cleanup."""
+
+    def replace(match: re.Match[str]) -> str:
+        codepoint = int(match.group(1) or match.group(2), 16)
+        if codepoint > 0x10FFFF:
+            return match.group(0)
+        character = chr(codepoint)
+        if character in _SPEECH_PUNCTUATION_REPLACEMENTS:
+            return character
+        if character in _SPEECH_SYMBOL_REPLACEMENTS:
+            return character
+        if "ARROW" in unicodedata.name(character, ""):
+            return character
+        if unicodedata.category(character).startswith(("P", "S")):
+            return character
+        return match.group(0)
+
+    return _ESCAPED_UNICODE_RE.sub(replace, value)
+
+
+def _decode_escaped_newlines(value: str) -> str:
+    """Restore literal newline escapes emitted by browser selection paths."""
+
+    return _ESCAPED_NEWLINE_RE.sub("\n", value)
+
+
 def _article_cleanup(text: str) -> str:
     removed_citation = False
 
@@ -230,7 +339,7 @@ def _article_cleanup(text: str) -> str:
     if removed_citation:
         # These repairs apply only when citation removal created the artifact;
         # article mode must not rewrite repeated punctuation in ordinary text.
-        value = re.sub(r",\s*,+", ",", value)
+        value = re.sub(r", *,+", ",", value)
         value = re.sub(r" +([,.;:!?])", r"\1", value)
     return value
 
@@ -243,8 +352,14 @@ def cleanup_text(text: str, profile: str = DEFAULT_CLEANUP_PROFILE) -> str:
     normalized = normalize_text(text)
     if profile == "off":
         return normalized
-    cleaned = _safe_cleanup(normalized)
-    return _article_cleanup(cleaned) if profile == "article" else cleaned
+    decoded = _decode_escaped_newlines(_decode_escaped_speech_characters(normalized))
+    cleaned = _safe_cleanup(decoded.translate(_FULLWIDTH_PUNCTUATION))
+    if profile == "article":
+        # Citation ranges can contain Unicode dashes. Match them before
+        # the speech pass turns those dashes into pauses.
+        cleaned = _article_cleanup(cleaned)
+    spoken = _speech_punctuation_cleanup(cleaned)
+    return _clean_spacing(re.sub(r" +([,.;:!?])", r"\1", spoken))
 
 
 def _sentence_boundary(text: str, start: int, end: int) -> int:
@@ -299,6 +414,19 @@ def sentence_chunks(text: str, target: int = CHUNK_TARGET) -> Iterator[str]:
         if chunk:
             yield chunk
         start = max(end, start + 1)
+
+
+def _line_chunks(text: str, target: int) -> Iterator[tuple[str, int]]:
+    """Yield synthesis chunks with the pause before each new line."""
+
+    pause_ms = 0
+    for index, part in enumerate(re.split(r"(\n+)", text)):
+        if index % 2:
+            pause_ms = LINE_PAUSE_MS if len(part) == 1 else PARAGRAPH_PAUSE_MS
+            continue
+        for chunk in sentence_chunks(part, target=target):
+            yield chunk, pause_ms
+            pause_ms = 0
 
 
 def _load_piper_voice(
@@ -738,7 +866,9 @@ class Worker:
             self._characters = actual
             self._error_code = ""
         self._emit("loading")
-        thread = threading.Thread(target=self._speak, args=(generation, text), daemon=True)
+        thread = threading.Thread(
+            target=self._speak, args=(generation, text, cleanup_profile), daemon=True
+        )
         with self._lock:
             self._thread = thread
         thread.start()
@@ -888,7 +1018,7 @@ class Worker:
         config = getattr(voice, "config", None)
         return int(getattr(config, "sample_rate", 22_050))
 
-    def _speak(self, generation: int, text: str) -> None:
+    def _speak(self, generation: int, text: str, cleanup_profile: str) -> None:
         sink: Optional[AudioSink] = None
         completed = False
         try:
@@ -907,15 +1037,24 @@ class Worker:
                 return
             self._emit_generation(generation, "speaking")
             first_audio = True
-            for chunk in sentence_chunks(text, target=self._chunk_target):
+            last_sample_rate = None
+            chunks = (
+                ((chunk, 0) for chunk in sentence_chunks(text, target=self._chunk_target))
+                if cleanup_profile == "off"
+                else _line_chunks(text, self._chunk_target)
+            )
+            for chunk, pause_ms in chunks:
                 if not self._active(generation):
                     return
+                if pause_ms and last_sample_rate is not None:
+                    silent_frames = max(1, last_sample_rate * pause_ms // 1000)
+                    sink.write(bytes(silent_frames * 2), last_sample_rate)
                 with self._lock:
                     speed = self._speed
                 config = _synthesis_config(speed)
                 # Piper's generator performs the actual ONNX inference while
                 # it is iterated, so hold this lock across both construction
-                # and iteration.  A canceled generation can still finish its
+                # and iteration. A canceled generation can still finish its
                 # current inference, but a replacement cannot overlap it.
                 with self._synthesis_lock:
                     if not self._active(generation):
@@ -931,7 +1070,8 @@ class Worker:
                             return
                         data = self._audio_bytes(audio)
                         if data:
-                            sink.write(data, self._sample_rate(audio, voice))
+                            last_sample_rate = self._sample_rate(audio, voice)
+                            sink.write(data, last_sample_rate)
                             if first_audio and self._active(generation):
                                 first_audio = False
                                 # This remains metadata-only and allows the

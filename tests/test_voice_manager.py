@@ -15,7 +15,16 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 MANAGER = ROOT / "bin" / "manage-voices"
 DEFAULT = "en_US-lessac-medium"
-VOICE_IDS = (DEFAULT, "en_US-kristin-medium", "en_US-john-medium", "en_GB-alba-medium")
+VOICE_IDS = (
+    DEFAULT,
+    "en_US-lessac-high",
+    "en_US-kristin-medium",
+    "en_US-john-medium",
+    "en_GB-alba-medium",
+    "en_GB-cori-high",
+    "en_US-ljspeech-high",
+    "en_US-ryan-high",
+)
 
 _LOADER = importlib.machinery.SourceFileLoader("manage_voices", str(MANAGER))
 _SPEC = importlib.util.spec_from_loader("manage_voices", _LOADER)
@@ -57,12 +66,12 @@ class VoiceManagerTests(unittest.TestCase):
             timeout=8,
         )
 
-    def test_catalog_has_exactly_four_fixed_ids_and_official_urls(self):
+    def test_catalog_has_exactly_eight_fixed_ids_and_official_urls(self):
         catalog = json.loads((ROOT / "share" / "voices.json").read_text(encoding="utf-8"))
         self.assertEqual(catalog["schemaVersion"], 1)
         self.assertEqual(catalog["defaultVoice"], DEFAULT)
         self.assertEqual([voice["id"] for voice in catalog["voices"]], list(VOICE_IDS))
-        self.assertEqual(len(catalog["voices"]), 4)
+        self.assertEqual(len(catalog["voices"]), 8)
         for voice in catalog["voices"]:
             self.assertTrue(voice["modelUrl"].startswith("https://huggingface.co/"))
             self.assertTrue(voice["configUrl"].startswith("https://huggingface.co/"))
